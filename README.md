@@ -117,3 +117,9 @@ build.sh            macOS 构建脚本
 - [marked](https://github.com/markedjs/marked) — MIT
 - [DOMPurify](https://github.com/cure53/DOMPurify) — Apache-2.0 / MPL-2.0
 - [Tauri](https://tauri.app/) — Apache-2.0 / MIT
+
+## 开源许可证
+
+轻阅 Markdown 自身代码采用 [MIT License](LICENSE) 开源：任何人都可以免费使用、复制、修改和分发，也可以用于商业项目，但必须保留原作者的版权与许可证声明。软件按现状提供，作者不承诺适用于所有场景，也不对使用软件造成的损失承担担保责任。
+
+应用内置第三方组件仍分别遵循各自的许可证，详情见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
