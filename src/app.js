@@ -7,6 +7,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   directoryFromPath,
   fileNameFromPath,
+  formatSelection,
   isExternalUrl,
   isMarkdownName,
   isRelativeImageSource,
@@ -34,6 +35,10 @@ const elements = {
   path: document.querySelector("#document-path"),
   dirtyDot: document.querySelector("#dirty-dot"),
   contentPanes: document.querySelector("#content-panes"),
+  formattingToolbar: document.querySelector(".formatting-toolbar"),
+  highlightTool: document.querySelector("#highlight-tool"),
+  redTextTool: document.querySelector("#red-text-tool"),
+  formattingHint: document.querySelector("#formatting-hint"),
   editor: document.querySelector("#editor"),
   preview: document.querySelector("#preview"),
   previewLoading: document.querySelector("#preview-loading"),
@@ -59,6 +64,7 @@ const state = {
   rendererReady: false,
   renderGeneration: 0,
   pendingAction: null,
+  formatTool: null,
   theme: localStorage.getItem("lightmark-theme") || "system",
 };
 
@@ -176,6 +182,7 @@ async function loadDocument(path, { refreshSiblings = false } = {}) {
   state.currentDirectory = payload.directory;
   state.lastSavedText = payload.contents;
   elements.editor.value = payload.contents;
+  setFormatTool(null);
   elements.title.textContent = payload.name;
   elements.path.textContent = payload.path;
   setDirty(false);
@@ -270,8 +277,63 @@ function setMode(mode) {
     : mode === "editing"
       ? "编辑模式 · 方向键移动光标"
       : "分栏模式 · 实时预览";
+  if (mode === "reading") setFormatTool(null);
   if (mode !== "reading") elements.editor.focus();
   if (mode !== "editing") renderPreview();
+}
+
+const formatToolDetails = {
+  highlight: { button: elements.highlightTool, label: "黄色高光笔" },
+  redText: { button: elements.redTextTool, label: "红色笔" },
+};
+
+function setFormatTool(tool) {
+  state.formatTool = tool;
+  Object.entries(formatToolDetails).forEach(([name, details]) => {
+    details.button.setAttribute("aria-pressed", String(name === tool));
+  });
+  elements.formattingToolbar.classList.toggle("tool-active", Boolean(tool));
+  elements.formattingHint.textContent = tool
+    ? `${formatToolDetails[tool].label}已开启 · 拖选文字即可标记 · Esc 退出`
+    : "先选中文字再点按钮，或先开启画笔再拖选";
+}
+
+function applyEditorFormat(tool) {
+  const result = formatSelection(
+    elements.editor.value,
+    elements.editor.selectionStart,
+    elements.editor.selectionEnd,
+    tool,
+  );
+  if (!result.applied) {
+    elements.formattingHint.textContent = result.reason === "multiple-blocks"
+      ? "一次请只标记同一段文字"
+      : "请先选中要标记的文字";
+    return false;
+  }
+
+  elements.editor.value = result.text;
+  elements.editor.focus();
+  elements.editor.setSelectionRange(result.selectionStart, result.selectionEnd);
+  elements.editor.dispatchEvent(new Event("input", { bubbles: true }));
+  if (!state.formatTool) {
+    elements.formattingHint.textContent = result.removed ? "已移除文字标记" : "已添加文字标记";
+  }
+  return true;
+}
+
+function handleFormatToolClick(tool) {
+  if (state.formatTool) {
+    setFormatTool(state.formatTool === tool ? null : tool);
+    elements.editor.focus();
+    return;
+  }
+  if (elements.editor.selectionStart !== elements.editor.selectionEnd) {
+    applyEditorFormat(tool);
+    return;
+  }
+  setFormatTool(tool);
+  elements.editor.focus();
 }
 
 function toggleSidebar() {
@@ -336,6 +398,11 @@ elements.editor.addEventListener("input", () => {
   setDirty(elements.editor.value !== state.lastSavedText);
   renderPreview();
 });
+elements.editor.addEventListener("mouseup", () => {
+  if (state.formatTool && elements.editor.selectionStart !== elements.editor.selectionEnd) {
+    requestAnimationFrame(() => applyEditorFormat(state.formatTool));
+  }
+});
 elements.openFile.addEventListener("click", () => chooseFile().catch((error) => showError("无法打开文件", error)));
 elements.openFolder.addEventListener("click", () => chooseFolder().catch((error) => showError("无法打开文件夹", error)));
 elements.saveFile.addEventListener("click", () => saveDocument().catch((error) => showError("无法保存文件", error)));
@@ -347,6 +414,10 @@ elements.collapseSidebar.addEventListener("click", toggleSidebar);
 elements.expandSidebar.addEventListener("click", toggleSidebar);
 elements.themeToggle.addEventListener("click", cycleTheme);
 elements.syntaxHelp.addEventListener("click", showSyntaxGuide);
+for (const [tool, details] of Object.entries(formatToolDetails)) {
+  details.button.addEventListener("mousedown", (event) => event.preventDefault());
+  details.button.addEventListener("click", () => handleFormatToolClick(tool));
+}
 elements.syntaxSearch.addEventListener("input", filterSyntaxGuide);
 elements.cancelPending.addEventListener("click", () => {
   state.pendingAction = null;
@@ -369,6 +440,12 @@ elements.savePending.addEventListener("click", async () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.formatTool) {
+    event.preventDefault();
+    setFormatTool(null);
+    elements.editor.focus();
+    return;
+  }
   const control = event.ctrlKey || event.metaKey;
   if (control && event.key.toLocaleLowerCase() === "s") {
     event.preventDefault();
