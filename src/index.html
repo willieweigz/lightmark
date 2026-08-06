@@ -100,7 +100,24 @@
           <article data-search="图片 image relative"><h3>图片</h3><code>![图片说明](images/photo.png)</code></article>
           <article data-search="代码块 code fence"><h3>代码块</h3><code>```js<br>console.log('Hello')<br>```</code></article>
           <article data-search="表格 table"><h3>表格</h3><code>| 名称 | 数值 |<br>| --- | ---: |<br>| 示例 | 100 |</code></article>
-          <article data-search="Callout Obsidian 提示"><h3>Callout</h3><code>&gt; [!note] 提示<br>&gt; 这里是内容<br><br>&gt; [!faq]- 默认收起</code></article>
+          <article class="syntax-wide callout-reference" data-search="Callout Obsidian 提示 折叠 嵌套 note abstract summary tldr info todo tip hint important success check done question help faq warning caution attention failure fail missing danger error bug example quote cite">
+            <h3>Callout（Obsidian）</h3>
+            <p class="syntax-description">支持自定义标题、默认展开或收起、多层嵌套，以及 Obsidian 官方内置类型和别名。</p>
+            <div class="syntax-reference-grid">
+              <section>
+                <h4>基础与自定义标题</h4>
+                <code>&gt; [!note] 自定义标题<br>&gt; 这里是内容</code>
+                <h4>展开与收起</h4>
+                <code>&gt; [!faq]- 默认收起<br>&gt; 收起的内容<br><br>&gt; [!tip]+ 默认展开<br>&gt; 展开的内容</code>
+                <h4>多层嵌套</h4>
+                <code>&gt; [!question] 可以嵌套吗？<br>&gt; &gt; [!todo] 可以<br>&gt; &gt; &gt; [!example] 支持多层</code>
+              </section>
+              <section>
+                <h4>官方类型与别名</h4>
+                <code>note<br>abstract · summary · tldr<br>info<br>todo<br>tip · hint · important<br>success · check · done<br>question · help · faq<br>warning · caution · attention<br>failure · fail · missing<br>danger · error<br>bug<br>example<br>quote · cite</code>
+              </section>
+            </div>
+          </article>
           <article data-search="Wiki Link Obsidian 双链"><h3>Wiki Link</h3><code>[[文档名称]]<br>[[文档名称|显示文字]]</code></article>
           <article data-search="Frontmatter YAML 属性"><h3>Frontmatter</h3><code>---<br>title: 文档标题<br>tags: [示例]<br>---</code></article>
         </div>

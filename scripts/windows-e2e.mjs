@@ -1,10 +1,14 @@
 import { chromium } from "playwright-core";
+import { spawn } from "node:child_process";
 import { readFile, mkdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 const endpoint = process.env.LIGHTMARK_CDP_URL || "http://127.0.0.1:9222";
 const savedDocumentPath = process.env.LIGHTMARK_E2E_DOCUMENT;
+const appPath = process.env.LIGHTMARK_E2E_APP;
+const secondaryDocumentPath = process.env.LIGHTMARK_E2E_SECONDARY_DOCUMENT;
 const screenshotPath = resolve("work", "lightmark-windows-acceptance.png");
+const syntaxScreenshotPath = resolve("work", "lightmark-callout-guide.png");
 
 if (!savedDocumentPath) {
   throw new Error("LIGHTMARK_E2E_DOCUMENT is required");
@@ -37,7 +41,7 @@ assert(await page.locator("#previous-document").isDisabled(), "首篇的上一�
 assert(await page.locator("#next-document").isEnabled(), "首篇的下一篇按钮不可用");
 assert(await page.locator(".document-item.active .document-name").textContent() === "01-第一页.md", "首篇没有高亮");
 const displayedPath = await text(page.locator("#document-path"));
-assert(displayedPath.includes("含 空格") && !displayedPath.startsWith("\\\\?\\"), `Windows 路径显示不友好：${displayedPath}`);
+assert(displayedPath.includes(" ") && /[\u3400-\u9fff]/u.test(displayedPath) && !displayedPath.startsWith("\\\\?\\"), `Windows 路径显示不友好：${displayedPath}`);
 record("自然排序、中文空格路径、首篇高亮、页码与按钮状态", names.join(" → "));
 
 await page.locator("#next-document").click();
@@ -110,7 +114,12 @@ await page.locator("#syntax-dialog").waitFor({ state: "visible" });
 assert(await page.locator("#syntax-grid article").count() === 12, "语法速查条目不完整");
 await page.locator("#syntax-search").fill("Callout");
 assert(await page.locator("#syntax-grid article:visible").count() === 1, "语法速查筛选不正确");
-assert((await text(page.locator("#syntax-grid article:visible"))).includes("Callout"), "语法速查缺少 Callout");
+const calloutGuide = await text(page.locator("#syntax-grid article:visible"));
+assert(calloutGuide.includes("Callout"), "语法速查缺少 Callout");
+assert(["note", "abstract", "info", "todo", "tip", "success", "question", "warning", "failure", "danger", "bug", "example", "quote"].every((type) => calloutGuide.includes(type)), "语法速查缺少官方 Callout 类型");
+assert(["summary", "tldr", "hint", "important", "check", "done", "help", "faq", "caution", "attention", "fail", "missing", "error", "cite"].every((alias) => calloutGuide.includes(alias)), "语法速查缺少 Callout 别名");
+assert(calloutGuide.includes("默认收起") && calloutGuide.includes("默认展开") && calloutGuide.includes("多层嵌套"), "语法速查缺少 Callout 折叠或嵌套示例");
+await page.screenshot({ path: syntaxScreenshotPath });
 await page.locator("#syntax-dialog .dialog-header button").click();
 record("Markdown 语法速查与搜索");
 
@@ -128,6 +137,19 @@ await page.locator("#expand-sidebar").click();
 assert(!await page.locator("#sidebar").evaluate((element) => element.classList.contains("collapsed")), "侧栏未展开");
 record("文档列表收起与展开");
 
+if (appPath && secondaryDocumentPath) {
+  const secondary = spawn(appPath, [secondaryDocumentPath], { stdio: "ignore", windowsHide: true });
+  const secondaryExit = new Promise((resolveExit) => secondary.once("exit", (code) => resolveExit(code)));
+  await page.locator("#document-title").filter({ hasText: basename(secondaryDocumentPath) }).waitFor({ timeout: 10_000 });
+  const exitCode = await Promise.race([
+    secondaryExit,
+    new Promise((resolveExit) => setTimeout(() => resolveExit("timeout"), 5_000)),
+  ]);
+  assert(exitCode !== "timeout", "第二次启动没有被单实例插件及时结束");
+  assert(await text(page.locator("#page-indicator")) === "3 / 3", "第二次启动的文档没有交给已有窗口");
+  record("单实例：重复启动聚焦已有窗口并打开新文档");
+}
+
 await mkdir(resolve("work"), { recursive: true });
 await page.screenshot({ path: screenshotPath });
 
@@ -135,6 +157,7 @@ console.log(JSON.stringify({
   appUrl: page.url(),
   savedDocumentPath,
   screenshotPath,
+  syntaxScreenshotPath,
   results,
 }, null, 2));
 

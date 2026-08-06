@@ -201,7 +201,12 @@ dialog::backdrop { background: rgba(18, 18, 16, .36); backdrop-filter: blur(3px)
 .syntax-search input { min-height: 34px; border: 1px solid var(--line); border-radius: 7px; padding: 0 11px; color: var(--ink); background: var(--surface); }
 .syntax-grid { max-height: 520px; overflow: auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding-right: 4px; }
 .syntax-grid article { min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 12px 13px; background: var(--surface); }
+.syntax-grid .syntax-wide { grid-column: 1 / -1; }
 .syntax-grid h3 { margin: 0 0 8px; color: var(--accent-strong); font-size: 12px; }
+.syntax-grid h4 { margin: 12px 0 6px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .04em; }
+.syntax-grid h4:first-child { margin-top: 0; }
+.syntax-description { margin: -2px 0 12px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.syntax-reference-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .82fr); gap: 18px; }
 .syntax-grid code { display: block; overflow: auto; color: var(--ink); font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; line-height: 1.6; white-space: nowrap; }
 .syntax-no-results { padding: 28px 0; color: var(--muted); text-align: center; }
 .confirm-dialog p { color: var(--muted); line-height: 1.55; }
@@ -225,4 +230,5 @@ dialog::backdrop { background: rgba(18, 18, 16, .36); backdrop-filter: blur(3px)
   .split-mode::before { display: none; }
   .split-mode .preview-pane { display: none; }
   .syntax-grid { grid-template-columns: 1fr; }
+  .syntax-reference-grid { grid-template-columns: 1fr; }
 }

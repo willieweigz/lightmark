@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { message, open, save } from "@tauri-apps/plugin-dialog";
@@ -60,6 +61,15 @@ const state = {
   pendingAction: null,
   theme: localStorage.getItem("lightmark-theme") || "system",
 };
+
+listen("single-instance", (event) => {
+  const paths = Array.isArray(event.payload) ? event.payload : [];
+  const markdownPath = paths.find(isMarkdownName);
+  if (markdownPath) {
+    guardUnsaved(() => loadDocument(markdownPath, { refreshSiblings: true }))
+      .catch((error) => showError("无法打开文档", error));
+  }
+}).catch(console.error);
 
 async function prepareRenderer() {
   elements.preview.src = "/preview.html";
