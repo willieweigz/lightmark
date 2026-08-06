@@ -30,3 +30,57 @@ export function directoryFromPath(path) {
   const index = Math.max(normalized.lastIndexOf("\\"), normalized.lastIndexOf("/"));
   return index >= 0 ? normalized.slice(0, index) : "";
 }
+
+const inlineFormats = Object.freeze({
+  highlight: { opening: "<mark>", closing: "</mark>" },
+  redText: { opening: '<span class="text-red">', closing: "</span>" },
+});
+
+export function formatSelection(source, selectionStart, selectionEnd, format) {
+  const wrapper = inlineFormats[format];
+  const validRange = Number.isInteger(selectionStart)
+    && Number.isInteger(selectionEnd)
+    && selectionStart >= 0
+    && selectionEnd <= source.length
+    && selectionStart < selectionEnd;
+  if (!wrapper || !validRange) return { text: source, applied: false, reason: "invalid-selection" };
+
+  const { opening, closing } = wrapper;
+  const selected = source.slice(selectionStart, selectionEnd);
+  if (/\r?\n\r?\n/.test(selected)) return { text: source, applied: false, reason: "multiple-blocks" };
+
+  const outerStart = selectionStart - opening.length;
+  const outerEnd = selectionEnd + closing.length;
+  if (
+    outerStart >= 0
+    && source.slice(outerStart, selectionStart) === opening
+    && source.slice(selectionEnd, outerEnd) === closing
+  ) {
+    return {
+      text: source.slice(0, outerStart) + selected + source.slice(outerEnd),
+      selectionStart: outerStart,
+      selectionEnd: outerStart + selected.length,
+      applied: true,
+      removed: true,
+    };
+  }
+
+  if (selected.startsWith(opening) && selected.endsWith(closing)) {
+    const content = selected.slice(opening.length, -closing.length);
+    return {
+      text: source.slice(0, selectionStart) + content + source.slice(selectionEnd),
+      selectionStart,
+      selectionEnd: selectionStart + content.length,
+      applied: true,
+      removed: true,
+    };
+  }
+
+  return {
+    text: source.slice(0, selectionStart) + opening + selected + closing + source.slice(selectionEnd),
+    selectionStart: selectionStart + opening.length,
+    selectionEnd: selectionEnd + opening.length,
+    applied: true,
+    removed: false,
+  };
+}

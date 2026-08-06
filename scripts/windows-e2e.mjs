@@ -9,6 +9,7 @@ const appPath = process.env.LIGHTMARK_E2E_APP;
 const secondaryDocumentPath = process.env.LIGHTMARK_E2E_SECONDARY_DOCUMENT;
 const screenshotPath = resolve("work", "lightmark-windows-acceptance.png");
 const syntaxScreenshotPath = resolve("work", "lightmark-callout-guide.png");
+const formattingScreenshotPath = resolve("work", "lightmark-formatting-tools.png");
 
 if (!savedDocumentPath) {
   throw new Error("LIGHTMARK_E2E_DOCUMENT is required");
@@ -80,6 +81,43 @@ assert(await text(page.locator("#page-indicator")) === "2 / 3", "编辑模式方
 record("编辑模式方向键只移动光标");
 
 await editor.press("Control+End");
+await editor.type("\n\n黄色高光测试 红色文字测试", { delay: 1 });
+await editor.evaluate((element) => {
+  const start = element.value.indexOf("黄色高光测试");
+  element.setSelectionRange(start, start + "黄色高光测试".length);
+});
+await page.locator("#highlight-tool").click();
+assert((await editor.inputValue()).includes("<mark>黄色高光测试</mark>"), "黄色高光按钮没有自动添加 mark 代码");
+
+await editor.evaluate((element) => {
+  const end = element.value.length;
+  element.setSelectionRange(end, end);
+});
+await page.locator("#red-text-tool").click();
+assert(await page.locator("#red-text-tool").getAttribute("aria-pressed") === "true", "红色笔没有进入开启状态");
+await editor.evaluate((element) => {
+  const start = element.value.indexOf("红色文字测试");
+  element.setSelectionRange(start, start + "红色文字测试".length);
+  element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+});
+await page.waitForFunction(() => document.querySelector("#editor").value.includes('<span class="text-red">红色文字测试</span>'));
+await page.locator("#red-text-tool").click();
+assert(await page.locator("#red-text-tool").getAttribute("aria-pressed") === "false", "红色笔没有正常退出");
+await page.getByRole("button", { name: "分栏" }).click();
+await preview.locator("mark", { hasText: "黄色高光测试" }).waitFor();
+await preview.locator(".text-red", { hasText: "红色文字测试" }).waitFor();
+const highlightStyle = await preview.locator("mark", { hasText: "黄色高光测试" }).evaluate((element) => {
+  const style = getComputedStyle(element);
+  return { background: style.backgroundColor, color: style.color };
+});
+assert(highlightStyle.background !== "rgba(0, 0, 0, 0)", "黄色高光没有浅黄色背景");
+assert(highlightStyle.color === "rgb(33, 29, 18)", `黄色高光文字不是黑色：${highlightStyle.color}`);
+const redColor = await preview.locator(".text-red", { hasText: "红色文字测试" }).evaluate((element) => getComputedStyle(element).color);
+assert(redColor !== highlightStyle.color, "红色文字没有显示为红色");
+await page.screenshot({ path: formattingScreenshotPath });
+record("黄色高光与红色笔：按钮应用、画笔拖选、代码写入和实时预览");
+
+await editor.press("Control+End");
 await editor.type("\n\n## Ctrl+S 验收\n已从磁盘真实回读。\n\n<script>window.__lightmarkPwned = true</script>\n<img src=\"missing.png\" onerror=\"window.__lightmarkPwned=true\">", { delay: 1 });
 await page.getByRole("button", { name: "分栏" }).click();
 await preview.getByText("Ctrl+S 验收", { exact: true }).waitFor();
@@ -111,7 +149,7 @@ await page.locator("#page-indicator").filter({ hasText: "2 / 3" }).waitFor();
 await page.getByRole("button", { name: "阅读" }).click();
 await page.locator("#syntax-help").click();
 await page.locator("#syntax-dialog").waitFor({ state: "visible" });
-assert(await page.locator("#syntax-grid article").count() === 12, "语法速查条目不完整");
+assert(await page.locator("#syntax-grid article").count() === 14, "语法速查条目不完整");
 await page.locator("#syntax-search").fill("Callout");
 assert(await page.locator("#syntax-grid article:visible").count() === 1, "语法速查筛选不正确");
 const calloutGuide = await text(page.locator("#syntax-grid article:visible"));
@@ -158,6 +196,7 @@ console.log(JSON.stringify({
   savedDocumentPath,
   screenshotPath,
   syntaxScreenshotPath,
+  formattingScreenshotPath,
   results,
 }, null, 2));
 

@@ -7,6 +7,32 @@ private enum ViewMode: Int {
     case split = 2
 }
 
+private enum InlineFormatTool: Equatable {
+    case highlight
+    case redText
+
+    var opening: String {
+        switch self {
+        case .highlight: return "<mark>"
+        case .redText: return "<span class=\"text-red\">"
+        }
+    }
+
+    var closing: String {
+        switch self {
+        case .highlight: return "</mark>"
+        case .redText: return "</span>"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .highlight: return "黄色高光笔"
+        case .redText: return "红色笔"
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var documents: [DocumentWindowController] = []
     private var pendingOpenURLs: [URL] = []
@@ -214,6 +240,21 @@ private final class DocumentWindow: NSWindow {
     }
 }
 
+private final class FormattingTextView: NSTextView {
+    var onMouseSelectionFinished: (() -> Void)?
+    var onCancelFormatTool: (() -> Bool)?
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        onMouseSelectionFinished?()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53, onCancelFormatTool?() == true { return }
+        super.keyDown(with: event)
+    }
+}
+
 private final class SyntaxGuideViewController: NSViewController, NSSearchFieldDelegate {
     private let guideText: String
     private let searchField = NSSearchField()
@@ -406,6 +447,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private var isUpdatingSidebarSelection = false
     private var syntaxPopover: NSPopover?
     private var syntaxGuideController: SyntaxGuideViewController?
+    private var activeFormatTool: InlineFormatTool?
 
     private let sidebarToggleButton = NSButton(title: "☰", target: nil, action: nil)
     private let modeControl = NSSegmentedControl(labels: ["阅读", "编辑", "分栏"], trackingMode: .selectOne, target: nil, action: nil)
@@ -415,7 +457,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let previousButton = NSButton(title: "‹", target: nil, action: nil)
     private let nextButton = NSButton(title: "›", target: nil, action: nil)
     private let positionLabel = NSTextField(labelWithString: "")
-    private let editor = NSTextView()
+    private let editorContainer = NSView()
+    private let formattingBar = NSVisualEffectView()
+    private let formattingHint = NSTextField(labelWithString: "先选中文字再点按钮，或先开启画笔再拖选")
+    private let highlightButton = NSButton(title: "黄色高光", target: nil, action: nil)
+    private let redTextButton = NSButton(title: "红色笔", target: nil, action: nil)
+    private let editor = FormattingTextView()
     private let editorScroll = NSScrollView()
     private let webView: WKWebView
     private let splitView = NSSplitView()
@@ -569,6 +616,45 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         documentAreaSplitView.addArrangedSubview(sidebarContainer)
         documentAreaSplitView.addArrangedSubview(splitView)
 
+        editorContainer.translatesAutoresizingMaskIntoConstraints = false
+        formattingBar.material = .contentBackground
+        formattingBar.blendingMode = .withinWindow
+        formattingBar.state = .active
+        formattingBar.translatesAutoresizingMaskIntoConstraints = false
+        editorContainer.addSubview(formattingBar)
+
+        for button in [highlightButton, redTextButton] {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.setButtonType(.toggle)
+            button.font = .systemFont(ofSize: 11.5, weight: .medium)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            formattingBar.addSubview(button)
+        }
+        highlightButton.target = self
+        highlightButton.action = #selector(useHighlightTool(_:))
+        highlightButton.toolTip = "黄色高光：选中文字后点击，或开启后拖选文字"
+        highlightButton.contentTintColor = .systemYellow
+        if let image = NSImage(systemSymbolName: "highlighter", accessibilityDescription: "黄色高光") {
+            highlightButton.image = image
+            highlightButton.imagePosition = .imageLeading
+        }
+        redTextButton.target = self
+        redTextButton.action = #selector(useRedTextTool(_:))
+        redTextButton.toolTip = "红色文字：选中文字后点击，或开启后拖选文字"
+        redTextButton.contentTintColor = .systemRed
+        if let image = NSImage(systemSymbolName: "pencil.tip", accessibilityDescription: "红色笔") {
+            redTextButton.image = image
+            redTextButton.imagePosition = .imageLeading
+        }
+
+        formattingHint.font = .systemFont(ofSize: 10.5)
+        formattingHint.textColor = .secondaryLabelColor
+        formattingHint.lineBreakMode = .byTruncatingTail
+        formattingHint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        formattingHint.translatesAutoresizingMaskIntoConstraints = false
+        formattingBar.addSubview(formattingHint)
+
         editor.isRichText = false
         editor.allowsUndo = true
         editor.isAutomaticQuoteSubstitutionEnabled = false
@@ -583,13 +669,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         editor.isVerticallyResizable = true
         editor.isHorizontallyResizable = false
         editor.textContainer?.widthTracksTextView = true
+        editor.onMouseSelectionFinished = { [weak self] in self?.applyActiveFormatToolToSelection() }
+        editor.onCancelFormatTool = { [weak self] in
+            guard let self, self.activeFormatTool != nil else { return false }
+            self.setActiveFormatTool(nil)
+            return true
+        }
+        editorScroll.translatesAutoresizingMaskIntoConstraints = false
         editorScroll.documentView = editor
         editorScroll.hasVerticalScroller = true
         editorScroll.drawsBackground = true
+        editorContainer.addSubview(editorScroll)
 
         webView.navigationDelegate = self
         webView.setValue(false, forKey: "drawsBackground")
-        splitView.addArrangedSubview(editorScroll)
+        splitView.addArrangedSubview(editorContainer)
         splitView.addArrangedSubview(webView)
 
         NSLayoutConstraint.activate([
@@ -627,13 +721,28 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             previousButton.centerYAnchor.constraint(equalTo: modeControl.centerYAnchor),
             previousButton.widthAnchor.constraint(equalToConstant: 26),
             previousButton.heightAnchor.constraint(equalToConstant: 28),
+            formattingBar.leadingAnchor.constraint(equalTo: editorContainer.leadingAnchor),
+            formattingBar.trailingAnchor.constraint(equalTo: editorContainer.trailingAnchor),
+            formattingBar.topAnchor.constraint(equalTo: editorContainer.topAnchor),
+            formattingBar.heightAnchor.constraint(equalToConstant: 40),
+            highlightButton.leadingAnchor.constraint(equalTo: formattingBar.leadingAnchor, constant: 10),
+            highlightButton.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
+            redTextButton.leadingAnchor.constraint(equalTo: highlightButton.trailingAnchor, constant: 6),
+            redTextButton.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
+            formattingHint.leadingAnchor.constraint(equalTo: redTextButton.trailingAnchor, constant: 10),
+            formattingHint.trailingAnchor.constraint(lessThanOrEqualTo: formattingBar.trailingAnchor, constant: -10),
+            formattingHint.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
+            editorScroll.leadingAnchor.constraint(equalTo: editorContainer.leadingAnchor),
+            editorScroll.trailingAnchor.constraint(equalTo: editorContainer.trailingAnchor),
+            editorScroll.topAnchor.constraint(equalTo: formattingBar.bottomAnchor),
+            editorScroll.bottomAnchor.constraint(equalTo: editorContainer.bottomAnchor),
             documentAreaSplitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             documentAreaSplitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             documentAreaSplitView.topAnchor.constraint(equalTo: topBar.bottomAnchor),
             documentAreaSplitView.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
 
-        editorScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
+        editorContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         webView.widthAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
         applySidebarVisibility()
         applyMode(.reading)
@@ -654,6 +763,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             statusLabel.stringValue = "拖入文件即可阅读"
         }
         editor.string = text
+        setActiveFormatTool(nil)
         lastSavedText = text
         updateTitle()
         refreshSiblingDocuments()
@@ -883,6 +993,88 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: item)
     }
 
+    @objc private func useHighlightTool(_ sender: NSButton) { handleFormatTool(.highlight) }
+    @objc private func useRedTextTool(_ sender: NSButton) { handleFormatTool(.redText) }
+
+    private func handleFormatTool(_ tool: InlineFormatTool) {
+        if let activeFormatTool {
+            setActiveFormatTool(activeFormatTool == tool ? nil : tool)
+            window?.makeFirstResponder(editor)
+            return
+        }
+        if editor.selectedRange().length > 0 {
+            _ = applyFormat(tool)
+        } else {
+            setActiveFormatTool(tool)
+        }
+        window?.makeFirstResponder(editor)
+    }
+
+    private func setActiveFormatTool(_ tool: InlineFormatTool?) {
+        activeFormatTool = tool
+        highlightButton.state = tool == .highlight ? .on : .off
+        redTextButton.state = tool == .redText ? .on : .off
+        formattingHint.stringValue = tool.map { "\($0.label)已开启 · 拖选文字即可标记 · Esc 退出" }
+            ?? "先选中文字再点按钮，或先开启画笔再拖选"
+        formattingHint.textColor = tool == nil ? .secondaryLabelColor : .controlAccentColor
+    }
+
+    private func applyActiveFormatToolToSelection() {
+        guard let activeFormatTool, editor.selectedRange().length > 0 else { return }
+        _ = applyFormat(activeFormatTool)
+    }
+
+    @discardableResult
+    private func applyFormat(_ tool: InlineFormatTool) -> Bool {
+        let source = editor.string as NSString
+        let selection = editor.selectedRange()
+        guard selection.location != NSNotFound,
+              selection.length > 0,
+              NSMaxRange(selection) <= source.length else {
+            formattingHint.stringValue = "请先选中要标记的文字"
+            return false
+        }
+
+        let selected = source.substring(with: selection)
+        guard !selected.replacingOccurrences(of: "\r\n", with: "\n").contains("\n\n") else {
+            NSSound.beep()
+            formattingHint.stringValue = "一次请只标记同一段文字"
+            return false
+        }
+
+        let openingLength = (tool.opening as NSString).length
+        let closingLength = (tool.closing as NSString).length
+        var replacementRange = selection
+        var replacement = tool.opening + selected + tool.closing
+        var nextSelection = NSRange(location: selection.location + openingLength, length: selection.length)
+        var removed = false
+
+        let outerStart = selection.location - openingLength
+        let outerEnd = NSMaxRange(selection) + closingLength
+        if outerStart >= 0,
+           outerEnd <= source.length,
+           source.substring(with: NSRange(location: outerStart, length: openingLength)) == tool.opening,
+           source.substring(with: NSRange(location: NSMaxRange(selection), length: closingLength)) == tool.closing {
+            replacementRange = NSRange(location: outerStart, length: openingLength + selection.length + closingLength)
+            replacement = selected
+            nextSelection = NSRange(location: outerStart, length: selection.length)
+            removed = true
+        } else if selected.hasPrefix(tool.opening), selected.hasSuffix(tool.closing) {
+            let selectedNSString = selected as NSString
+            let contentLength = selectedNSString.length - openingLength - closingLength
+            replacement = selectedNSString.substring(with: NSRange(location: openingLength, length: contentLength))
+            nextSelection = NSRange(location: selection.location, length: contentLength)
+            removed = true
+        }
+
+        editor.insertText(replacement, replacementRange: replacementRange)
+        editor.setSelectedRange(nextSelection)
+        if activeFormatTool == nil {
+            formattingHint.stringValue = removed ? "已移除文字标记" : "已添加文字标记"
+        }
+        return true
+    }
+
     private func renderPreview() {
         guard webReady else { return }
         let text = editor.string
@@ -900,8 +1092,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private func applyMode(_ mode: ViewMode) {
         currentMode = mode
         modeControl.selectedSegment = mode.rawValue
-        editorScroll.isHidden = mode == .reading
+        editorContainer.isHidden = mode == .reading
         webView.isHidden = mode == .editing
+        if mode == .reading { setActiveFormatTool(nil) }
         if mode == .split {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -938,6 +1131,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         *斜体*
         ~~删除线~~
         `行内代码`
+
+        黄色高光
+        <mark>需要高光的文字</mark>
+
+        红色文字
+        <span class="text-red">红色文字</span>
 
         列表
         - 无序列表
