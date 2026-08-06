@@ -1,5 +1,13 @@
-.DS_Store
+node_modules/
 dist/
+src-tauri/target/
+src-tauri/gen/
+*.log
+.DS_Store
 *.xcuserstate
 *.swp
 *.tmp
+.idea/
+.vscode/
+coverage/
+work/

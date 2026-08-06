@@ -55,6 +55,11 @@
   .frontmatter pre { margin:0; border:0; border-top:1px solid var(--line); border-radius:0 0 8px 8px; }
   @media (max-width:680px) { #page { padding:34px 25px 80px; } }
 </style>
+<!-- Windows/Tauri loads these packaged files directly. The inline placeholders
+     remain as the macOS fallback because WKWebView uses the document directory
+     as its base URL for relative images. -->
+<script src="marked.min.js"></script>
+<script src="purify.min.js"></script>
 <script>/*__MARKED__*/</script>
 <script>/*__PURIFY__*/</script>
 </head>

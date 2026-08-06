@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" role="img" aria-labelledby="title desc">
+  <title id="title">轻阅 Markdown 离线图片</title>
+  <desc id="desc">一张用于验证相对路径加载的绿色阅读卡片</desc>
+  <rect width="960" height="360" rx="28" fill="#e7eee9"/>
+  <path d="M178 86h234c38 0 68 30 68 68v142H246c-38 0-68-30-68-68V86Z" fill="#2f6255"/>
+  <path d="M782 86H548c-38 0-68 30-68 68v142h234c38 0 68-30 68-68V86Z" fill="#3e7768"/>
+  <path d="M480 154c-23-34-61-51-114-51H220v157h146c53 0 91 12 114 36 23-24 61-36 114-36h146V103H594c-53 0-91 17-114 51Z" fill="#fbfaf7" opacity=".96"/>
+  <g fill="#2f6255">
+    <rect x="260" y="142" width="154" height="13" rx="6.5"/>
+    <rect x="260" y="176" width="122" height="10" rx="5" opacity=".58"/>
+    <rect x="260" y="205" width="144" height="10" rx="5" opacity=".58"/>
+    <rect x="546" y="142" width="154" height="13" rx="6.5"/>
+    <rect x="578" y="176" width="122" height="10" rx="5" opacity=".58"/>
+    <rect x="556" y="205" width="144" height="10" rx="5" opacity=".58"/>
+  </g>
+  <text x="480" y="333" text-anchor="middle" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" font-size="22" font-weight="600" fill="#2f6255">轻阅 Markdown · 完全离线</text>
+</svg>
