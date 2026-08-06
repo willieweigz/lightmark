@@ -79,6 +79,10 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 - 远程图片默认阻止；相对路径图片由应用从本地读取
 - 外部链接交给系统默认浏览器打开
 
+## 代码签名政策
+
+Windows 开源代码签名的适用范围、发布审批、维护者角色、隐私和卸载说明见 [Code signing policy](CODE_SIGNING_POLICY.md)。项目正在申请 SignPath Foundation 的免费开源代码签名；在获批并接入发布流程以前，下载页会继续明确标注安装包尚未签名。
+
 ## Windows 开发与构建
 
 前置环境：
