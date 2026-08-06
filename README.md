@@ -4,6 +4,31 @@
 
 轻阅专注于打开本地文档和文件夹、连续阅读、快速修改与安全预览。应用不依赖 Electron，不连接 CDN，也不会让 Markdown 文档执行不受信任脚本。
 
+## 下载
+
+不需要安装开发工具，请直接从 [GitHub Releases](https://github.com/willieweigz/lightmark/releases/latest) 下载最新版：
+
+| 系统 | 下载 | 适用范围 |
+| --- | --- | --- |
+| Windows | [下载 Windows x64 安装版](https://github.com/willieweigz/lightmark/releases/latest/download/LightMark_Windows_x64_Setup.exe) | Windows 11 64 位 |
+| macOS | [下载 macOS 通用版](https://github.com/willieweigz/lightmark/releases/latest/download/LightMark_macOS_Universal.zip) | macOS 13 及以上，Apple 芯片与 Intel 芯片 |
+
+### Windows 安装
+
+1. 下载 `LightMark_Windows_x64_Setup.exe` 并运行。
+2. 安装完成后，从开始菜单打开“轻阅 Markdown”。
+3. 也可以右键 `.md` 或 `.markdown` 文件，选择“打开方式 → 轻阅 Markdown”。
+
+安装包目前没有商业代码签名。如果 Windows SmartScreen 提示“Windows 已保护你的电脑”，请确认文件来自本仓库，然后选择“更多信息 → 仍要运行”。
+
+### macOS 安装
+
+1. 下载并解压 `LightMark_macOS_Universal.zip`。
+2. 将“轻阅 Markdown.app”拖入“应用程序”文件夹。
+3. 首次运行时按住 Control 点击应用，选择“打开”，再确认一次“打开”。
+
+macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，因此首次打开需要上述确认。
+
 ## 平台
 
 | 平台 | 桌面实现 | 系统渲染引擎 | 分发方式 |
