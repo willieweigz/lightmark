@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>轻阅 Markdown</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header class="toolbar" aria-label="主工具栏">
+        <div class="toolbar-group file-actions">
+          <button id="open-file" class="button" title="打开 Markdown 文件（Ctrl+O）">打开文件</button>
+          <button id="open-folder" class="button" title="打开文件夹（Ctrl+Shift+O）">打开文件夹</button>
+          <span class="toolbar-separator" aria-hidden="true"></span>
+          <button id="save-file" class="icon-button" title="保存（Ctrl+S）" aria-label="保存">保存</button>
+          <button id="save-as" class="button quiet" title="另存为（Ctrl+Shift+S）">另存为</button>
+        </div>
+
+        <div class="document-navigation" aria-label="文档导航">
+          <button id="previous-document" class="nav-button" aria-label="上一篇" title="上一篇（←）">‹</button>
+          <output id="page-indicator" aria-live="polite">— / —</output>
+          <button id="next-document" class="nav-button" aria-label="下一篇" title="下一篇（→）">›</button>
+        </div>
+
+        <div class="toolbar-group view-actions">
+          <div class="mode-switcher" role="group" aria-label="查看模式">
+            <button data-mode="reading" class="mode-button active" aria-pressed="true">阅读</button>
+            <button data-mode="editing" class="mode-button" aria-pressed="false">编辑</button>
+            <button data-mode="split" class="mode-button" aria-pressed="false">分栏</button>
+          </div>
+          <button id="theme-toggle" class="button quiet" title="主题：跟随系统">系统主题</button>
+          <button id="syntax-help" class="button quiet" title="Markdown 语法速查（Ctrl+/）">语法</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside id="sidebar" class="sidebar" aria-label="Markdown 文件列表">
+          <div class="sidebar-header">
+            <div>
+              <p class="eyebrow">文档</p>
+              <h1 id="folder-name">尚未打开文件夹</h1>
+            </div>
+            <button id="collapse-sidebar" class="icon-button collapse-button" aria-label="收起文档列表" title="收起文档列表（Ctrl+\\）">‹</button>
+          </div>
+          <nav id="document-list" class="document-list" aria-label="同文件夹 Markdown 文档"></nav>
+          <p id="empty-list" class="empty-list">打开一个 Markdown 文件或文件夹开始阅读。</p>
+        </aside>
+
+        <button id="expand-sidebar" class="expand-sidebar" aria-label="展开文档列表" title="展开文档列表（Ctrl+\\）">›</button>
+
+        <section class="document-area" aria-label="文档内容">
+          <div class="document-heading">
+            <div class="title-stack">
+              <span id="dirty-dot" class="dirty-dot" aria-hidden="true"></span>
+              <h2 id="document-title">轻阅 Markdown</h2>
+            </div>
+            <span id="document-path" class="document-path">离线 Markdown 阅读与编辑器</span>
+          </div>
+
+          <div id="content-panes" class="content-panes reading-mode">
+            <div id="editor-pane" class="pane editor-pane" aria-label="Markdown 编辑器">
+              <textarea id="editor" spellcheck="false" aria-label="Markdown 编辑器" placeholder="在这里输入 Markdown…"></textarea>
+            </div>
+            <div id="preview-pane" class="pane preview-pane" aria-label="Markdown 预览">
+              <iframe id="preview" title="Markdown 预览" sandbox="allow-scripts allow-same-origin"></iframe>
+              <div id="preview-loading" class="preview-loading">正在准备离线渲染器…</div>
+            </div>
+          </div>
+
+          <footer class="statusbar">
+            <span id="save-status">未打开文档</span>
+            <span id="mode-status">阅读模式 · ← → 翻页</span>
+          </footer>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="syntax-dialog" class="syntax-dialog">
+      <form method="dialog" class="dialog-shell">
+        <header class="dialog-header">
+          <div>
+            <p class="eyebrow">离线参考</p>
+            <h2>Markdown 语法速查</h2>
+          </div>
+          <button class="icon-button" value="close" aria-label="关闭语法速查">×</button>
+        </header>
+        <label class="syntax-search">
+          <span>筛选语法</span>
+          <input id="syntax-search" type="search" placeholder="例如：表格、Callout、图片" autocomplete="off" />
+        </label>
+        <div id="syntax-grid" class="syntax-grid">
+          <article data-search="标题 heading"><h3>标题</h3><code># 一级标题<br>## 二级标题<br>### 三级标题</code></article>
+          <article data-search="粗体 斜体 删除线 text"><h3>文字</h3><code>**粗体**<br>*斜体*<br>~~删除线~~</code></article>
+          <article data-search="列表 list"><h3>列表</h3><code>- 无序列表<br>1. 有序列表</code></article>
+          <article data-search="任务 列表 task checkbox"><h3>任务列表</h3><code>- [ ] 待完成<br>- [x] 已完成</code></article>
+          <article data-search="引用 quote"><h3>引用</h3><code>&gt; 引用内容</code></article>
+          <article data-search="链接 link"><h3>链接</h3><code>[显示文字](https://example.com)</code></article>
+          <article data-search="图片 image relative"><h3>图片</h3><code>![图片说明](images/photo.png)</code></article>
+          <article data-search="代码块 code fence"><h3>代码块</h3><code>```js<br>console.log('Hello')<br>```</code></article>
+          <article data-search="表格 table"><h3>表格</h3><code>| 名称 | 数值 |<br>| --- | ---: |<br>| 示例 | 100 |</code></article>
+          <article data-search="Callout Obsidian 提示"><h3>Callout</h3><code>&gt; [!note] 提示<br>&gt; 这里是内容<br><br>&gt; [!faq]- 默认收起</code></article>
+          <article data-search="Wiki Link Obsidian 双链"><h3>Wiki Link</h3><code>[[文档名称]]<br>[[文档名称|显示文字]]</code></article>
+          <article data-search="Frontmatter YAML 属性"><h3>Frontmatter</h3><code>---<br>title: 文档标题<br>tags: [示例]<br>---</code></article>
+        </div>
+        <p id="syntax-no-results" class="syntax-no-results" hidden>没有匹配的语法。</p>
+      </form>
+    </dialog>
+
+    <dialog id="unsaved-dialog" class="confirm-dialog">
+      <div class="dialog-shell compact">
+        <p class="eyebrow">未保存修改</p>
+        <h2>要保存当前文档吗？</h2>
+        <p>如果不保存，刚才的修改将丢失。</p>
+        <div class="dialog-actions">
+          <button id="cancel-pending" class="button quiet">取消</button>
+          <button id="discard-pending" class="button danger">不保存</button>
+          <button id="save-pending" class="button primary">保存并继续</button>
+        </div>
+      </div>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

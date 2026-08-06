@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fffdf7"/>
+      <stop offset="1" stop-color="#e8efe9"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#2f6255"/>
+  <path d="M86 130c0-20 16-36 36-36h102c18 0 32 6 32 23v282c-18-22-45-34-81-34H86V130Z" fill="url(#paper)"/>
+  <path d="M426 130c0-20-16-36-36-36H288c-18 0-32 6-32 23v282c18-22 45-34 81-34h89V130Z" fill="#f4f7f2"/>
+  <path d="M256 117v282" stroke="#b8c9be" stroke-width="8" stroke-linecap="round"/>
+  <g fill="#2f6255">
+    <rect x="126" y="150" width="92" height="14" rx="7"/>
+    <rect x="126" y="194" width="68" height="10" rx="5" opacity=".58"/>
+    <rect x="126" y="229" width="90" height="10" rx="5" opacity=".58"/>
+    <rect x="294" y="150" width="92" height="14" rx="7"/>
+    <rect x="318" y="194" width="68" height="10" rx="5" opacity=".58"/>
+    <rect x="296" y="229" width="90" height="10" rx="5" opacity=".58"/>
+  </g>
+  <path d="M126 289h92v22h-92zm168 0h92v22h-92z" fill="#cf9b42"/>
+</svg>

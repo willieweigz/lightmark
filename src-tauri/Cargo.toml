@@ -1,0 +1,18 @@
+[package]
+name = "lightmark"
+version = "0.4.0"
+description = "轻量、离线的 Markdown 阅读与编辑器"
+authors = ["Willie Wei"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+mime_guess = "2"
+percent-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
