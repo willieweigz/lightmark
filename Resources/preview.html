@@ -34,13 +34,21 @@
   .callout { --callout:#5b7cfa; margin:1.3em 0; border:1px solid color-mix(in srgb,var(--callout) 35%,transparent); border-left:4px solid var(--callout); border-radius:9px; padding:11px 15px 12px; background:color-mix(in srgb,var(--callout) 9%,var(--paper)); }
   .callout-title { color:var(--callout); display:flex; align-items:center; gap:8px; font-weight:700; line-height:1.4; }
   .callout-icon { width:20px; text-align:center; }
+  details.callout > summary { cursor:pointer; list-style:none; user-select:none; }
+  details.callout > summary::-webkit-details-marker { display:none; }
+  .callout-fold { margin-left:auto; font-size:1.2em; line-height:1; transition:transform .16s ease; }
+  details.callout[open] .callout-fold { transform:rotate(90deg); }
   .callout-body > :first-child { margin-top:.55em; }
   .callout-body > :last-child { margin-bottom:0; }
   .callout-note,.callout-info,.callout-todo { --callout:#4c79d8; }
-  .callout-tip,.callout-success,.callout-check,.callout-done { --callout:#2d9d78; }
-  .callout-warning,.callout-caution,.callout-attention,.callout-question,.callout-help,.callout-faq { --callout:#d18a18; }
+  .callout-abstract,.callout-summary,.callout-tldr { --callout:#2d9fa3; }
+  .callout-tip,.callout-hint,.callout-important { --callout:#24a6a8; }
+  .callout-success,.callout-check,.callout-done { --callout:#2d9d78; }
+  .callout-question,.callout-help,.callout-faq { --callout:#c19a16; }
+  .callout-warning,.callout-caution,.callout-attention { --callout:#d18a18; }
   .callout-danger,.callout-error,.callout-failure,.callout-fail,.callout-missing,.callout-bug { --callout:#d94c4c; }
-  .callout-example,.callout-quote,.callout-cite { --callout:#8a63cf; }
+  .callout-example { --callout:#8a63cf; }
+  .callout-quote,.callout-cite { --callout:#7b7b82; }
   .wikilink { color:var(--accent); text-decoration:underline; text-decoration-style:dotted; text-underline-offset:3px; }
   .frontmatter { margin:0 0 1.8em; border:1px solid var(--line); border-radius:8px; color:var(--muted); }
   .frontmatter summary { cursor:pointer; padding:7px 12px; font-size:.85em; }
@@ -79,7 +87,7 @@
       const match = lines[i].match(/^>\s*\[!([\w-]+)\]([+-])?\s*(.*)$/i);
       if (!match) { regular.push(lines[i]); continue; }
       flush();
-      const type=match[1].toLowerCase(), body=[];
+      const type=match[1].toLowerCase(), fold=match[2], body=[];
       while (i+1<lines.length) {
         const q=lines[i+1].match(/^> ?(.*)$/);
         if (!q) break;
@@ -87,14 +95,21 @@
       }
       const fallback=type.charAt(0).toUpperCase()+type.slice(1), icon=(meta[type]||['●',fallback])[0];
       const title=match[3] || (meta[type]||['',fallback])[1];
-      out += `<aside class="callout callout-${esc(type)}"><div class="callout-title"><span class="callout-icon">${icon}</span><span>${esc(title)}</span></div><div class="callout-body">${marked.parse(inlineWiki(body.join('\n')))}</div></aside>`;
+      const bodyHTML=renderBlocks(body.join('\n'));
+      const titleHTML=`<span class="callout-icon">${icon}</span><span>${esc(title)}</span>`;
+      if (fold) {
+        const open=fold==='+'?' open':'';
+        out += `<details class="callout callout-${esc(type)}" data-callout="${esc(type)}"${open}><summary class="callout-title">${titleHTML}<span class="callout-fold">›</span></summary><div class="callout-body">${bodyHTML}</div></details>`;
+      } else {
+        out += `<aside class="callout callout-${esc(type)}" data-callout="${esc(type)}"><div class="callout-title">${titleHTML}</div><div class="callout-body">${bodyHTML}</div></aside>`;
+      }
     }
     flush(); return out;
   }
   window.lightmarkRender = md => {
     const fm=frontmatter(md);
     const html=fm.head+renderBlocks(fm.body);
-    document.getElementById('page').innerHTML=DOMPurify.sanitize(html,{ADD_TAGS:['aside','details','summary'],ADD_ATTR:['class','open','title']});
+    document.getElementById('page').innerHTML=DOMPurify.sanitize(html,{ADD_TAGS:['aside','details','summary'],ADD_ATTR:['class','open','title','data-callout']});
   };
   window.lightmarkSetScale = scale => document.documentElement.style.setProperty('--scale',scale);
 </script>
