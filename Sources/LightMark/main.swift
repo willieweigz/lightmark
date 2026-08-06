@@ -185,8 +185,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let helpItem = NSMenuItem()
         main.addItem(helpItem)
         let helpMenu = NSMenu(title: "帮助")
-        let syntax = helpMenu.addItem(withTitle: "Markdown 语法速查", action: #selector(showMarkdownSyntax(_:)), keyEquivalent: "")
+        let syntax = helpMenu.addItem(withTitle: "Markdown 语法速查（⌘F / ⌘/）", action: #selector(showMarkdownSyntax(_:)), keyEquivalent: "/")
         syntax.target = self
+        syntax.keyEquivalentModifierMask = [.command]
         helpItem.submenu = helpMenu
         NSApp.helpMenu = helpMenu
 
@@ -197,9 +198,197 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 private final class DocumentWindow: NSWindow {
     weak var documentController: DocumentWindowController?
 
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let key = event.charactersIgnoringModifiers?.lowercased()
+        if modifiers == [.command], key == "f" || key == "/" {
+            documentController?.showSyntaxGuide(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
         if documentController?.handleNavigationKey(event) == true { return }
         super.keyDown(with: event)
+    }
+}
+
+private final class SyntaxGuideViewController: NSViewController, NSSearchFieldDelegate {
+    private let guideText: String
+    private let searchField = NSSearchField()
+    private let resultLabel = NSTextField(labelWithString: "")
+    private let guideView = NSTextView(frame: NSRect(x: 0, y: 0, width: 410, height: 2200))
+    private var matches: [NSRange] = []
+    private var currentMatch = 0
+
+    init(guideText: String) {
+        self.guideText = guideText
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func loadView() {
+        let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 450, height: 570))
+        root.material = .popover
+        root.state = .active
+
+        let heading = NSTextField(labelWithString: "Markdown 语法速查")
+        heading.font = .systemFont(ofSize: 16, weight: .semibold)
+        heading.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(heading)
+
+        searchField.placeholderString = "搜索语法，例如 Callout、折叠、图片"
+        searchField.sendsSearchStringImmediately = true
+        searchField.delegate = self
+        searchField.target = self
+        searchField.action = #selector(searchSubmitted(_:))
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(searchField)
+
+        resultLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        resultLabel.textColor = .secondaryLabelColor
+        resultLabel.alignment = .right
+        resultLabel.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(resultLabel)
+
+        let previous = NSButton(title: "‹", target: self, action: #selector(previousResult(_:)))
+        previous.bezelStyle = .inline
+        previous.toolTip = "上一个结果（Shift+Enter）"
+        previous.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(previous)
+
+        let next = NSButton(title: "›", target: self, action: #selector(nextResult(_:)))
+        next.bezelStyle = .inline
+        next.toolTip = "下一个结果（Enter）"
+        next.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(next)
+
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(scroll)
+
+        guideView.isEditable = false
+        guideView.isSelectable = true
+        guideView.drawsBackground = false
+        guideView.font = .monospacedSystemFont(ofSize: 12.5, weight: .regular)
+        guideView.textColor = .labelColor
+        guideView.textContainerInset = NSSize(width: 8, height: 8)
+        guideView.autoresizingMask = [.width]
+        guideView.minSize = NSSize(width: 0, height: 0)
+        guideView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        guideView.isVerticallyResizable = true
+        guideView.isHorizontallyResizable = false
+        guideView.textContainer?.widthTracksTextView = true
+        guideView.textContainer?.containerSize = NSSize(width: 414, height: CGFloat.greatestFiniteMagnitude)
+        guideView.string = guideText
+        scroll.documentView = guideView
+
+        NSLayoutConstraint.activate([
+            heading.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
+            heading.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            heading.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
+            searchField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            searchField.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 12),
+            searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 250),
+            resultLabel.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: 8),
+            resultLabel.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            resultLabel.widthAnchor.constraint(equalToConstant: 45),
+            previous.leadingAnchor.constraint(equalTo: resultLabel.trailingAnchor, constant: 3),
+            previous.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            previous.widthAnchor.constraint(equalToConstant: 25),
+            next.leadingAnchor.constraint(equalTo: previous.trailingAnchor, constant: 1),
+            next.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            next.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            next.widthAnchor.constraint(equalToConstant: 25),
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
+            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
+            scroll.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 10),
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10)
+        ])
+
+        view = root
+    }
+
+    func focusSearch() {
+        _ = view
+        view.window?.makeFirstResponder(searchField)
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        rebuildMatches()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)), !searchField.stringValue.isEmpty {
+            searchField.stringValue = ""
+            rebuildMatches()
+            return true
+        }
+        return false
+    }
+
+    @objc private func searchSubmitted(_ sender: Any?) {
+        let backwards = NSApp.currentEvent?.modifierFlags.contains(.shift) == true
+        moveResult(by: backwards ? -1 : 1)
+    }
+
+    @objc private func previousResult(_ sender: Any?) { moveResult(by: -1) }
+    @objc private func nextResult(_ sender: Any?) { moveResult(by: 1) }
+
+    private func rebuildMatches() {
+        guard let storage = guideView.textStorage else { return }
+        let fullRange = NSRange(location: 0, length: storage.length)
+        storage.removeAttribute(.backgroundColor, range: fullRange)
+        matches.removeAll()
+        currentMatch = 0
+
+        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            resultLabel.stringValue = ""
+            return
+        }
+
+        let source = storage.string as NSString
+        var searchRange = NSRange(location: 0, length: source.length)
+        while searchRange.length > 0 {
+            let found = source.range(of: query, options: [.caseInsensitive, .diacriticInsensitive], range: searchRange)
+            guard found.location != NSNotFound else { break }
+            matches.append(found)
+            let nextLocation = found.location + max(found.length, 1)
+            guard nextLocation <= source.length else { break }
+            searchRange = NSRange(location: nextLocation, length: source.length - nextLocation)
+        }
+
+        for range in matches {
+            storage.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.58), range: range)
+        }
+        showCurrentMatch()
+    }
+
+    private func moveResult(by offset: Int) {
+        guard !matches.isEmpty else { return }
+        currentMatch = (currentMatch + offset + matches.count) % matches.count
+        showCurrentMatch()
+    }
+
+    private func showCurrentMatch() {
+        guard let storage = guideView.textStorage else { return }
+        for range in matches {
+            storage.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.58), range: range)
+        }
+        guard !matches.isEmpty else {
+            resultLabel.stringValue = "0 / 0"
+            return
+        }
+        let active = matches[currentMatch]
+        storage.addAttribute(.backgroundColor, value: NSColor.systemOrange.withAlphaComponent(0.86), range: active)
+        guideView.scrollRangeToVisible(active)
+        resultLabel.stringValue = "\(currentMatch + 1) / \(matches.count)"
     }
 }
 
@@ -216,6 +405,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private var didChooseInitialSidebarVisibility = false
     private var isUpdatingSidebarSelection = false
     private var syntaxPopover: NSPopover?
+    private var syntaxGuideController: SyntaxGuideViewController?
 
     private let sidebarToggleButton = NSButton(title: "☰", target: nil, action: nil)
     private let modeControl = NSSegmentedControl(labels: ["阅读", "编辑", "分栏"], trackingMode: .selectOne, target: nil, action: nil)
@@ -299,7 +489,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         syntaxButton.font = .systemFont(ofSize: 12, weight: .medium)
         syntaxButton.target = self
         syntaxButton.action = #selector(showSyntaxGuide(_:))
-        syntaxButton.toolTip = "Markdown 语法速查"
+        syntaxButton.toolTip = "Markdown 语法速查（⌘F 或 ⌘/）"
         syntaxButton.translatesAutoresizingMaskIntoConstraints = false
         topBar.addSubview(syntaxButton)
 
@@ -727,48 +917,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     @objc func showSplit(_ sender: Any?) { applyMode(.split) }
 
     @objc func showSyntaxGuide(_ sender: Any?) {
-        syntaxPopover?.close()
+        if syntaxPopover?.isShown == true {
+            syntaxGuideController?.focusSearch()
+            return
+        }
 
         let popover = NSPopover()
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 430, height: 520)
+        popover.contentSize = NSSize(width: 450, height: 570)
 
-        let controller = NSViewController()
-        let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 430, height: 520))
-        root.material = .popover
-        root.state = .active
-
-        let heading = NSTextField(labelWithString: "Markdown 语法速查")
-        heading.font = .systemFont(ofSize: 16, weight: .semibold)
-        heading.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(heading)
-
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.drawsBackground = false
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(scroll)
-
-        let guide = NSTextView(frame: NSRect(x: 0, y: 0, width: 410, height: 900))
-        guide.isEditable = false
-        guide.isSelectable = true
-        guide.drawsBackground = false
-        guide.font = .monospacedSystemFont(ofSize: 12.5, weight: .regular)
-        guide.textColor = .labelColor
-        guide.textContainerInset = NSSize(width: 8, height: 8)
-        guide.autoresizingMask = [.width]
-        guide.minSize = NSSize(width: 0, height: 0)
-        guide.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        guide.isVerticallyResizable = true
-        guide.isHorizontallyResizable = false
-        guide.textContainer?.widthTracksTextView = true
-        guide.textContainer?.containerSize = NSSize(width: 394, height: CGFloat.greatestFiniteMagnitude)
-        guide.string = """
+        let guideText = """
         标题
         # 一级标题
         ## 二级标题
         ### 三级标题
+        #### 四级标题
 
         文字
         **粗体**
@@ -807,27 +970,45 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         > [!warning] 注意
         > 这里填写警告内容
 
+        完整 Callout 类型与别名
+        note
+        abstract / summary / tldr
+        info
+        todo
+        tip / hint / important
+        success / check / done
+        question / help / faq
+        warning / caution / attention
+        failure / fail / missing
+        danger / error
+        bug
+        example
+        quote / cite
+
+        可折叠 Callout
+        > [!faq]- 默认收起
+        > 点击标题后显示内容
+
+        > [!tip]+ 默认展开
+        > 点击标题后收起内容
+
+        嵌套 Callout
+        > [!question] 外层 Callout
+        > > [!todo] 内层 Callout
+        > > 这里填写嵌套内容
+
         Obsidian Wiki Link
         [[文档名称]]
         [[文档名称|显示文字]]
         """
-        scroll.documentView = guide
 
-        NSLayoutConstraint.activate([
-            heading.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
-            heading.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
-            heading.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
-            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
-            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
-            scroll.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 10),
-            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10)
-        ])
-
-        controller.view = root
+        let controller = SyntaxGuideViewController(guideText: guideText)
         popover.contentViewController = controller
         let anchor = (sender as? NSView) ?? syntaxButton
         popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
         syntaxPopover = popover
+        syntaxGuideController = controller
+        DispatchQueue.main.async { controller.focusSearch() }
     }
 
     @objc func save(_ sender: Any?) {
