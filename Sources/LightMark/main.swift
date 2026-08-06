@@ -7,6 +7,17 @@ private enum ViewMode: Int {
     case split = 2
 }
 
+private enum SidebarMode: Int {
+    case documents = 0
+    case outline = 1
+}
+
+private struct DocumentHeading {
+    let level: Int
+    let title: String
+    let range: NSRange
+}
+
 private enum InlineFormatTool: Equatable {
     case highlight
     case redText
@@ -433,7 +444,7 @@ private final class SyntaxGuideViewController: NSViewController, NSSearchFieldDe
     }
 }
 
-final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, WKNavigationDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, WKNavigationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate {
     var onClose: (() -> Void)?
     private(set) var fileURL: URL?
     private var lastSavedText = ""
@@ -442,12 +453,24 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private var fontScale = 1.0
     private var currentMode = ViewMode.reading
     private var siblingURLs: [URL] = []
+    private var documentHeadings: [DocumentHeading] = []
+    private var sidebarMode = SidebarMode.documents
     private var sidebarVisible = false
     private var didChooseInitialSidebarVisibility = false
     private var isUpdatingSidebarSelection = false
     private var syntaxPopover: NSPopover?
     private var syntaxGuideController: SyntaxGuideViewController?
     private var activeFormatTool: InlineFormatTool?
+    private var isApplyingSplitLayout = false
+    private var editorOnRight = UserDefaults.standard.bool(forKey: "LightMarkEditorOnRight")
+    private var editorSplitRatio: CGFloat = {
+        let stored = UserDefaults.standard.double(forKey: "LightMarkEditorSplitRatio")
+        return stored >= 0.25 && stored <= 0.75 ? CGFloat(stored) : 0.44
+    }()
+    private var sidebarWidth: CGFloat = {
+        let stored = UserDefaults.standard.double(forKey: "LightMarkSidebarWidth")
+        return stored >= 170 && stored <= 310 ? CGFloat(stored) : 220
+    }()
 
     private let sidebarToggleButton = NSButton(title: "☰", target: nil, action: nil)
     private let modeControl = NSSegmentedControl(labels: ["阅读", "编辑", "分栏"], trackingMode: .selectOne, target: nil, action: nil)
@@ -462,12 +485,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let formattingHint = NSTextField(labelWithString: "先选中文字再点按钮，或先开启画笔再拖选")
     private let highlightButton = NSButton(title: "黄色高光", target: nil, action: nil)
     private let redTextButton = NSButton(title: "红色笔", target: nil, action: nil)
+    private let paneSwapButton = NSButton(title: "⇄ 换边", target: nil, action: nil)
     private let editor = FormattingTextView()
     private let editorScroll = NSScrollView()
     private let webView: WKWebView
     private let splitView = NSSplitView()
     private let documentAreaSplitView = NSSplitView()
     private let sidebarContainer = NSVisualEffectView()
+    private let sidebarModeControl = NSSegmentedControl(labels: ["文档", "本文目录"], trackingMode: .selectOne, target: nil, action: nil)
     private let sidebarScroll = NSScrollView()
     private let sidebarTable = NSTableView()
 
@@ -497,7 +522,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    deinit { NotificationCenter.default.removeObserver(self) }
+
     private var hasUnsavedChanges: Bool { editor.string != lastSavedText }
+    private static let outlineFenceRegex = try! NSRegularExpression(pattern: #"^ {0,3}(`{3,}|~{3,})"#)
+    private static let outlineHeadingRegex = try! NSRegularExpression(pattern: #"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$"#)
+    private static let outlineSetextRegex = try! NSRegularExpression(pattern: #"^ {0,3}(=+|-+)[ \t]*$"#)
 
     private func setupUI() {
         guard let window else { return }
@@ -577,14 +607,23 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         splitView.isVertical = true
         splitView.dividerStyle = .thin
+        splitView.delegate = self
         documentAreaSplitView.isVertical = true
         documentAreaSplitView.dividerStyle = .thin
+        documentAreaSplitView.delegate = self
         documentAreaSplitView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(documentAreaSplitView)
 
         sidebarContainer.material = .sidebar
         sidebarContainer.blendingMode = .withinWindow
         sidebarContainer.state = .active
+        sidebarModeControl.selectedSegment = SidebarMode.documents.rawValue
+        sidebarModeControl.segmentStyle = .texturedRounded
+        sidebarModeControl.controlSize = .small
+        sidebarModeControl.target = self
+        sidebarModeControl.action = #selector(sidebarModeChanged(_:))
+        sidebarModeControl.translatesAutoresizingMaskIntoConstraints = false
+        sidebarContainer.addSubview(sidebarModeControl)
         sidebarScroll.drawsBackground = false
         sidebarScroll.hasVerticalScroller = true
         sidebarScroll.autohidesScrollers = true
@@ -607,7 +646,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         NSLayoutConstraint.activate([
             sidebarScroll.leadingAnchor.constraint(equalTo: sidebarContainer.leadingAnchor),
             sidebarScroll.trailingAnchor.constraint(equalTo: sidebarContainer.trailingAnchor),
-            sidebarScroll.topAnchor.constraint(equalTo: sidebarContainer.topAnchor, constant: 8),
+            sidebarModeControl.leadingAnchor.constraint(equalTo: sidebarContainer.leadingAnchor, constant: 8),
+            sidebarModeControl.trailingAnchor.constraint(equalTo: sidebarContainer.trailingAnchor, constant: -8),
+            sidebarModeControl.topAnchor.constraint(equalTo: sidebarContainer.topAnchor, constant: 8),
+            sidebarModeControl.heightAnchor.constraint(equalToConstant: 25),
+            sidebarScroll.topAnchor.constraint(equalTo: sidebarModeControl.bottomAnchor, constant: 6),
             sidebarScroll.bottomAnchor.constraint(equalTo: sidebarContainer.bottomAnchor),
             sidebarContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 170),
             sidebarContainer.widthAnchor.constraint(lessThanOrEqualToConstant: 310)
@@ -648,6 +691,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             redTextButton.imagePosition = .imageLeading
         }
 
+        paneSwapButton.bezelStyle = .rounded
+        paneSwapButton.controlSize = .small
+        paneSwapButton.setButtonType(.toggle)
+        paneSwapButton.font = .systemFont(ofSize: 11.5, weight: .medium)
+        paneSwapButton.target = self
+        paneSwapButton.action = #selector(swapPaneSides(_:))
+        paneSwapButton.toolTip = "把编辑区移到右侧"
+        paneSwapButton.translatesAutoresizingMaskIntoConstraints = false
+        formattingBar.addSubview(paneSwapButton)
+
         formattingHint.font = .systemFont(ofSize: 10.5)
         formattingHint.textColor = .secondaryLabelColor
         formattingHint.lineBreakMode = .byTruncatingTail
@@ -679,12 +732,20 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         editorScroll.documentView = editor
         editorScroll.hasVerticalScroller = true
         editorScroll.drawsBackground = true
+        editorScroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(editorViewportDidChange(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: editorScroll.contentView
+        )
         editorContainer.addSubview(editorScroll)
 
         webView.navigationDelegate = self
         webView.setValue(false, forKey: "drawsBackground")
         splitView.addArrangedSubview(editorContainer)
         splitView.addArrangedSubview(webView)
+        applyPaneOrder()
 
         NSLayoutConstraint.activate([
             topBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -730,8 +791,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             redTextButton.leadingAnchor.constraint(equalTo: highlightButton.trailingAnchor, constant: 6),
             redTextButton.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
             formattingHint.leadingAnchor.constraint(equalTo: redTextButton.trailingAnchor, constant: 10),
-            formattingHint.trailingAnchor.constraint(lessThanOrEqualTo: formattingBar.trailingAnchor, constant: -10),
+            formattingHint.trailingAnchor.constraint(lessThanOrEqualTo: paneSwapButton.leadingAnchor, constant: -8),
             formattingHint.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
+            paneSwapButton.trailingAnchor.constraint(equalTo: formattingBar.trailingAnchor, constant: -10),
+            paneSwapButton.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
             editorScroll.leadingAnchor.constraint(equalTo: editorContainer.leadingAnchor),
             editorScroll.trailingAnchor.constraint(equalTo: editorContainer.trailingAnchor),
             editorScroll.topAnchor.constraint(equalTo: formattingBar.bottomAnchor),
@@ -763,6 +826,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             statusLabel.stringValue = "拖入文件即可阅读"
         }
         editor.string = text
+        refreshDocumentOutline()
         setActiveFormatTool(nil)
         lastSavedText = text
         updateTitle()
@@ -818,20 +882,24 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             previousButton.isEnabled = false
             nextButton.isEnabled = false
             positionLabel.stringValue = ""
-            isUpdatingSidebarSelection = true
-            sidebarTable.reloadData()
-            sidebarTable.deselectAll(nil)
-            DispatchQueue.main.async { [weak self] in self?.isUpdatingSidebarSelection = false }
+            if sidebarMode == .documents {
+                isUpdatingSidebarSelection = true
+                sidebarTable.reloadData()
+                sidebarTable.deselectAll(nil)
+                DispatchQueue.main.async { [weak self] in self?.isUpdatingSidebarSelection = false }
+            }
             return
         }
         previousButton.isEnabled = index > 0
         nextButton.isEnabled = index + 1 < siblingURLs.count
         positionLabel.stringValue = "\(index + 1) / \(siblingURLs.count)"
-        isUpdatingSidebarSelection = true
-        sidebarTable.reloadData()
-        sidebarTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-        sidebarTable.scrollRowToVisible(index)
-        DispatchQueue.main.async { [weak self] in self?.isUpdatingSidebarSelection = false }
+        if sidebarMode == .documents {
+            isUpdatingSidebarSelection = true
+            sidebarTable.reloadData()
+            sidebarTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            sidebarTable.scrollRowToVisible(index)
+            DispatchQueue.main.async { [weak self] in self?.isUpdatingSidebarSelection = false }
+        }
     }
 
     @objc private func showPreviousDocument(_ sender: Any?) { navigateDocument(by: -1) }
@@ -863,13 +931,144 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         sidebarToggleButton.contentTintColor = sidebarVisible ? .controlAccentColor : .secondaryLabelColor
         if sidebarVisible {
             DispatchQueue.main.async { [weak self] in
-                guard let self, self.documentAreaSplitView.bounds.width > 220 else { return }
-                self.documentAreaSplitView.setPosition(220, ofDividerAt: 0)
+                guard let self else { return }
+                let available = self.documentAreaSplitView.bounds.width - self.documentAreaSplitView.dividerThickness
+                guard available > 360 else { return }
+                self.sidebarWidth = min(310, max(170, min(self.sidebarWidth, available - 360)))
+                self.documentAreaSplitView.setPosition(self.sidebarWidth, ofDividerAt: 0)
             }
         }
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { siblingURLs.count }
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard let resized = notification.object as? NSSplitView else { return }
+        if resized === documentAreaSplitView, sidebarVisible, !sidebarContainer.isHidden {
+            let width = sidebarContainer.frame.width
+            guard width >= 170, width <= 310 else { return }
+            sidebarWidth = width
+            UserDefaults.standard.set(Double(width), forKey: "LightMarkSidebarWidth")
+        } else if resized === splitView, !isApplyingSplitLayout, currentMode == .split, !editorContainer.isHidden, !webView.isHidden {
+            let available = splitView.bounds.width - splitView.dividerThickness
+            guard available > 0 else { return }
+            let ratio = editorContainer.frame.width / available
+            guard ratio >= 0.25, ratio <= 0.75 else { return }
+            editorSplitRatio = ratio
+            UserDefaults.standard.set(Double(ratio), forKey: "LightMarkEditorSplitRatio")
+        }
+    }
+
+    private func cleanHeadingTitle(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: #"[ \t]+#+[ \t]*$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"[*_~`]"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func refreshDocumentOutline() {
+        let source = editor.string as NSString
+        var headings: [DocumentHeading] = []
+        var location = 0
+        var lineNumber = 0
+        var fence: (character: Character, length: Int)?
+        var inFrontmatter = false
+        var previousLine: (text: String, range: NSRange)?
+
+        while location < source.length {
+            let fullRange = source.lineRange(for: NSRange(location: location, length: 0))
+            var contentRange = fullRange
+            while contentRange.length > 0 {
+                let character = source.character(at: NSMaxRange(contentRange) - 1)
+                guard character == 10 || character == 13 else { break }
+                contentRange.length -= 1
+            }
+            let line = source.substring(with: contentRange)
+            let normalized = line.replacingOccurrences(of: "\u{FEFF}", with: "").trimmingCharacters(in: .whitespaces)
+            if lineNumber == 0, normalized == "---" {
+                inFrontmatter = true
+                previousLine = nil
+                location = NSMaxRange(fullRange)
+                lineNumber += 1
+                continue
+            }
+            if inFrontmatter {
+                if normalized == "---" { inFrontmatter = false }
+                previousLine = nil
+                location = NSMaxRange(fullRange)
+                lineNumber += 1
+                continue
+            }
+
+            let localRange = NSRange(location: 0, length: (line as NSString).length)
+            if let match = Self.outlineFenceRegex.firstMatch(in: line, options: [], range: localRange) {
+                let marker = (line as NSString).substring(with: match.range(at: 1))
+                if let current = fence {
+                    if marker.first == current.character, marker.count >= current.length { fence = nil }
+                } else if let character = marker.first {
+                    fence = (character, marker.count)
+                }
+                previousLine = nil
+            } else if fence == nil, let match = Self.outlineHeadingRegex.firstMatch(in: line, options: [], range: localRange) {
+                let marks = (line as NSString).substring(with: match.range(at: 1))
+                let title = cleanHeadingTitle((line as NSString).substring(with: match.range(at: 2)))
+                if !title.isEmpty { headings.append(DocumentHeading(level: marks.count, title: title, range: contentRange)) }
+                previousLine = nil
+            } else if fence == nil, let match = Self.outlineSetextRegex.firstMatch(in: line, options: [], range: localRange), let previous = previousLine {
+                let marks = (line as NSString).substring(with: match.range(at: 1))
+                let title = cleanHeadingTitle(previous.text)
+                if !title.isEmpty { headings.append(DocumentHeading(level: marks.first == "=" ? 1 : 2, title: title, range: previous.range)) }
+                previousLine = nil
+            } else if fence == nil {
+                previousLine = (line, contentRange)
+            } else {
+                previousLine = nil
+            }
+            location = NSMaxRange(fullRange)
+            lineNumber += 1
+        }
+
+        documentHeadings = headings
+        if sidebarMode == .outline {
+            isUpdatingSidebarSelection = true
+            sidebarTable.reloadData()
+            sidebarTable.deselectAll(nil)
+            DispatchQueue.main.async { [weak self] in self?.isUpdatingSidebarSelection = false }
+        }
+    }
+
+    private func jumpToHeading(_ heading: DocumentHeading, index: Int) {
+        if currentMode == .reading {
+            scrollPreviewToHeading(index)
+            return
+        }
+        editor.setSelectedRange(NSRange(location: heading.range.location, length: 0))
+        editor.scrollRangeToVisible(heading.range)
+        window?.makeFirstResponder(editor)
+        syncPreviewToEditor()
+        if currentMode == .split {
+            DispatchQueue.main.async { [weak self] in self?.scrollPreviewToHeading(index) }
+        }
+    }
+
+    private func scrollPreviewToHeading(_ index: Int) {
+        webView.evaluateJavaScript("document.querySelectorAll('h1,h2,h3,h4,h5,h6')[\(index)]?.scrollIntoView({block:'start',behavior:'auto'});")
+    }
+
+    @objc private func sidebarModeChanged(_ sender: NSSegmentedControl) {
+        sidebarMode = SidebarMode(rawValue: sender.selectedSegment) ?? .documents
+        isUpdatingSidebarSelection = true
+        sidebarTable.reloadData()
+        sidebarTable.deselectAll(nil)
+        if sidebarMode == .documents, let index = currentSiblingIndex {
+            sidebarTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            sidebarTable.scrollRowToVisible(index)
+        }
+        DispatchQueue.main.async { [weak self] in self?.isUpdatingSidebarSelection = false }
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        sidebarMode == .documents ? siblingURLs.count : documentHeadings.count
+    }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let identifier = NSUserInterfaceItemIdentifier("documentCell")
@@ -891,7 +1090,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
                 label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
             ])
         }
-        let name = siblingURLs[row].lastPathComponent
+        let name: String
+        if sidebarMode == .documents {
+            name = siblingURLs[row].lastPathComponent
+            cell.textField?.font = .systemFont(ofSize: 12.5)
+            cell.textField?.textColor = .labelColor
+        } else {
+            let heading = documentHeadings[row]
+            name = String(repeating: "  ", count: max(0, heading.level - 1)) + heading.title
+            cell.textField?.font = .systemFont(ofSize: 12.5, weight: heading.level == 1 ? .semibold : .regular)
+            cell.textField?.textColor = heading.level == 1 ? .labelColor : .secondaryLabelColor
+        }
         cell.textField?.stringValue = name
         cell.toolTip = name
         return cell
@@ -900,6 +1109,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !isUpdatingSidebarSelection else { return }
         let row = sidebarTable.selectedRow
+        if sidebarMode == .outline {
+            guard documentHeadings.indices.contains(row) else { return }
+            jumpToHeading(documentHeadings[row], index: row)
+            return
+        }
         guard siblingURLs.indices.contains(row), row != currentSiblingIndex else { return }
         if confirmLeavingCurrentDocument() {
             fileURL = siblingURLs[row]
@@ -987,6 +1201,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     func textDidChange(_ notification: Notification) {
         window?.isDocumentEdited = hasUnsavedChanges
         statusLabel.stringValue = hasUnsavedChanges ? "有未保存修改" : "已保存"
+        refreshDocumentOutline()
         renderWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.renderPreview() }
         renderWorkItem = item
@@ -1082,7 +1297,25 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
               var json = String(data: data, encoding: .utf8) else { return }
         json.removeFirst()
         json.removeLast()
-        webView.evaluateJavaScript("window.lightmarkRender(\(json)); window.lightmarkSetScale(\(fontScale));")
+        let followEditor = currentMode == .split
+            ? "requestAnimationFrame(() => { const e = document.scrollingElement; const max = Math.max(0, e.scrollHeight - innerHeight); window.scrollTo(0, max * \(editorViewportRatio())); });"
+            : ""
+        webView.evaluateJavaScript("window.lightmarkRender(\(json)); window.lightmarkSetScale(\(fontScale)); \(followEditor)")
+    }
+
+    private func editorViewportRatio() -> CGFloat {
+        guard let documentView = editorScroll.documentView else { return 0 }
+        let visibleHeight = editorScroll.contentView.bounds.height
+        let scrollRange = max(1, documentView.bounds.height - visibleHeight)
+        return min(1, max(0, editorScroll.contentView.bounds.origin.y / scrollRange))
+    }
+
+    @objc private func editorViewportDidChange(_ notification: Notification) { syncPreviewToEditor() }
+
+    private func syncPreviewToEditor() {
+        guard currentMode == .split, webReady else { return }
+        let ratio = editorViewportRatio()
+        webView.evaluateJavaScript("requestAnimationFrame(() => { const e = document.scrollingElement; const max = Math.max(0, e.scrollHeight - innerHeight); window.scrollTo(0, max * \(ratio)); });")
     }
 
     @objc private func modeChanged(_ sender: NSSegmentedControl) {
@@ -1094,11 +1327,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         modeControl.selectedSegment = mode.rawValue
         editorContainer.isHidden = mode == .reading
         webView.isHidden = mode == .editing
+        paneSwapButton.isEnabled = mode == .split
         if mode == .reading { setActiveFormatTool(nil) }
         if mode == .split {
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.splitView.setPosition(self.splitView.bounds.width * 0.44, ofDividerAt: 0)
+                self?.applySplitDividerPosition()
+                self?.syncPreviewToEditor()
             }
         }
         if mode != .editing { renderPreview() }
@@ -1108,6 +1342,46 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     @objc func showReading(_ sender: Any?) { applyMode(.reading) }
     @objc func showEditing(_ sender: Any?) { applyMode(.editing) }
     @objc func showSplit(_ sender: Any?) { applyMode(.split) }
+
+    @objc private func swapPaneSides(_ sender: Any?) {
+        guard currentMode == .split else { return }
+        editorOnRight.toggle()
+        UserDefaults.standard.set(editorOnRight, forKey: "LightMarkEditorOnRight")
+        DispatchQueue.main.async { [weak self] in
+            self?.applySplitDividerPosition()
+            self?.syncPreviewToEditor()
+        }
+        window?.makeFirstResponder(editor)
+    }
+
+    private func applyPaneOrder() {
+        if editorOnRight, splitView.arrangedSubviews.first === editorContainer {
+            splitView.removeArrangedSubview(editorContainer)
+            editorContainer.removeFromSuperview()
+            splitView.addArrangedSubview(editorContainer)
+        } else if !editorOnRight, splitView.arrangedSubviews.first === webView {
+            splitView.removeArrangedSubview(webView)
+            webView.removeFromSuperview()
+            splitView.addArrangedSubview(webView)
+        }
+        paneSwapButton.state = editorOnRight ? .on : .off
+        paneSwapButton.toolTip = editorOnRight ? "把编辑区移到左侧" : "把编辑区移到右侧"
+        paneSwapButton.setAccessibilityLabel(paneSwapButton.toolTip ?? "交换编辑区与预览区")
+    }
+
+    private func applySplitDividerPosition() {
+        isApplyingSplitLayout = true
+        defer { isApplyingSplitLayout = false }
+        applyPaneOrder()
+        let available = splitView.bounds.width - splitView.dividerThickness
+        guard available > 0 else { return }
+        let desiredLeft = available * (editorOnRight ? 1 - editorSplitRatio : editorSplitRatio)
+        let firstMinimum: CGFloat = editorOnRight ? 320 : 280
+        let secondMinimum: CGFloat = editorOnRight ? 280 : 320
+        let lower = min(firstMinimum, available / 2)
+        let upper = max(lower, available - min(secondMinimum, available / 2))
+        splitView.setPosition(min(upper, max(lower, desiredLeft)), ofDividerAt: 0)
+    }
 
     @objc func showSyntaxGuide(_ sender: Any?) {
         if syntaxPopover?.isShown == true {
@@ -1137,6 +1411,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         红色文字
         <span class="text-red">红色文字</span>
+
+        段落、换行与中文段首
+        第一段文字
+
+        第二段文字（中间空一整行就是新段落）
+        行尾加两个半角空格再回车，只换行、不分段
+        　　中文段首可输入两个全角空格
+        注意：行首 4 个半角空格会变成代码块，不是首行缩进
 
         列表
         - 无序列表

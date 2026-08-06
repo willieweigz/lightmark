@@ -6,6 +6,7 @@ import { message, open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   directoryFromPath,
+  extractHeadings,
   fileNameFromPath,
   formatSelection,
   isExternalUrl,
@@ -25,16 +26,26 @@ const elements = {
   modeButtons: [...document.querySelectorAll("[data-mode]")],
   themeToggle: document.querySelector("#theme-toggle"),
   syntaxHelp: document.querySelector("#syntax-help"),
+  workspace: document.querySelector(".workspace"),
   sidebar: document.querySelector("#sidebar"),
+  documentsTab: document.querySelector("#documents-tab"),
+  outlineTab: document.querySelector("#outline-tab"),
+  sidebarResizer: document.querySelector("#sidebar-resizer"),
   collapseSidebar: document.querySelector("#collapse-sidebar"),
   expandSidebar: document.querySelector("#expand-sidebar"),
   folderName: document.querySelector("#folder-name"),
   documentList: document.querySelector("#document-list"),
+  outlineList: document.querySelector("#outline-list"),
   emptyList: document.querySelector("#empty-list"),
+  emptyOutline: document.querySelector("#empty-outline"),
   title: document.querySelector("#document-title"),
   path: document.querySelector("#document-path"),
   dirtyDot: document.querySelector("#dirty-dot"),
   contentPanes: document.querySelector("#content-panes"),
+  editorPane: document.querySelector("#editor-pane"),
+  previewPane: document.querySelector("#preview-pane"),
+  splitResizer: document.querySelector("#split-resizer"),
+  paneSwap: document.querySelector("#pane-swap"),
   formattingToolbar: document.querySelector(".formatting-toolbar"),
   highlightTool: document.querySelector("#highlight-tool"),
   redTextTool: document.querySelector("#red-text-tool"),
@@ -56,6 +67,7 @@ const elements = {
 
 const state = {
   documents: [],
+  headings: [],
   currentPath: null,
   currentDirectory: null,
   lastSavedText: "",
@@ -66,7 +78,16 @@ const state = {
   pendingAction: null,
   formatTool: null,
   theme: localStorage.getItem("lightmark-theme") || "system",
+  editorSide: localStorage.getItem("lightmark-editor-side") === "right" ? "right" : "left",
+  editorSplitRatio: Math.min(0.75, Math.max(0.25, Number(localStorage.getItem("lightmark-editor-split-ratio")) || 0.44)),
+  sidebarWidth: Math.min(420, Math.max(190, Number(localStorage.getItem("lightmark-sidebar-width")) || 268)),
+  previewScrollFrame: 0,
+  sidebarView: "documents",
 };
+
+const SIDEBAR_MIN_WIDTH = 190;
+const SIDEBAR_MAX_WIDTH = 420;
+const SPLIT_DIVIDER_WIDTH = 7;
 
 listen("single-instance", (event) => {
   const paths = Array.isArray(event.payload) ? event.payload : [];
@@ -109,6 +130,7 @@ async function renderPreview() {
   const generation = ++state.renderGeneration;
   const previewWindow = elements.preview.contentWindow;
   previewWindow.lightmarkRender(elements.editor.value);
+  syncPreviewToEditor();
 
   const images = [...elements.preview.contentDocument.querySelectorAll("img")];
   await Promise.all(images.map(async (image) => {
@@ -129,6 +151,7 @@ async function renderPreview() {
       image.title = `无法加载本地图片：${source}`;
     }
   }));
+  syncPreviewToEditor();
 }
 
 function setDirty(dirty) {
@@ -158,7 +181,6 @@ async function refreshDirectory(directoryPath) {
 
 function renderDocumentList() {
   elements.documentList.replaceChildren();
-  elements.emptyList.hidden = state.documents.length > 0;
   state.documents.forEach((documentEntry, index) => {
     const button = document.createElement("button");
     button.className = "document-item";
@@ -171,6 +193,58 @@ function renderDocumentList() {
     elements.documentList.append(button);
   });
   updateNavigation();
+  updateSidebarView();
+}
+
+function updateSidebarView() {
+  const showingDocuments = state.sidebarView === "documents";
+  elements.documentsTab.classList.toggle("active", showingDocuments);
+  elements.outlineTab.classList.toggle("active", !showingDocuments);
+  elements.documentsTab.setAttribute("aria-selected", String(showingDocuments));
+  elements.outlineTab.setAttribute("aria-selected", String(!showingDocuments));
+  elements.documentList.hidden = !showingDocuments;
+  elements.outlineList.hidden = showingDocuments;
+  elements.emptyList.hidden = !showingDocuments || state.documents.length > 0;
+  elements.emptyOutline.hidden = showingDocuments || state.headings.length > 0;
+}
+
+function setSidebarView(view) {
+  state.sidebarView = view === "outline" ? "outline" : "documents";
+  updateSidebarView();
+}
+
+function renderOutline() {
+  state.headings = extractHeadings(elements.editor.value);
+  elements.outlineList.replaceChildren();
+  state.headings.forEach((heading, index) => {
+    const button = document.createElement("button");
+    button.className = "outline-item";
+    button.dataset.level = String(heading.level);
+    button.style.setProperty("--outline-indent", `${9 + (heading.level - 1) * 14}px`);
+    button.textContent = heading.title;
+    button.title = heading.title;
+    button.addEventListener("click", () => jumpToHeading(heading, index));
+    elements.outlineList.append(button);
+  });
+  updateSidebarView();
+}
+
+function scrollPreviewToHeading(index) {
+  const heading = elements.preview.contentDocument?.querySelectorAll("h1, h2, h3, h4, h5, h6")[index];
+  heading?.scrollIntoView({ block: "start", behavior: "auto" });
+}
+
+function jumpToHeading(heading, index) {
+  if (state.mode === "reading") {
+    scrollPreviewToHeading(index);
+    return;
+  }
+  elements.editor.focus();
+  elements.editor.setSelectionRange(heading.offset, heading.offset);
+  const scrollRange = Math.max(0, elements.editor.scrollHeight - elements.editor.clientHeight);
+  const documentRatio = elements.editor.value.length ? heading.offset / elements.editor.value.length : 0;
+  elements.editor.scrollTop = Math.max(0, scrollRange * documentRatio - elements.editor.clientHeight * 0.16);
+  if (state.mode === "split") setTimeout(() => scrollPreviewToHeading(index), 0);
 }
 
 async function loadDocument(path, { refreshSiblings = false } = {}) {
@@ -182,6 +256,7 @@ async function loadDocument(path, { refreshSiblings = false } = {}) {
   state.currentDirectory = payload.directory;
   state.lastSavedText = payload.contents;
   elements.editor.value = payload.contents;
+  renderOutline();
   setFormatTool(null);
   elements.title.textContent = payload.name;
   elements.path.textContent = payload.path;
@@ -266,7 +341,9 @@ async function navigate(by) {
 
 function setMode(mode) {
   state.mode = mode;
-  elements.contentPanes.className = `content-panes ${mode}-mode`;
+  elements.contentPanes.classList.remove("reading-mode", "editing-mode", "split-mode");
+  elements.contentPanes.classList.add(`${mode}-mode`);
+  updatePaneOrder();
   elements.modeButtons.forEach((button) => {
     const active = button.dataset.mode === mode;
     button.classList.toggle("active", active);
@@ -276,10 +353,102 @@ function setMode(mode) {
     ? "阅读模式 · ← → 翻页"
     : mode === "editing"
       ? "编辑模式 · 方向键移动光标"
-      : "分栏模式 · 实时预览";
+      : "分栏模式 · 编辑与预览同步跟随";
+  elements.paneSwap.disabled = mode !== "split";
   if (mode === "reading") setFormatTool(null);
   if (mode !== "reading") elements.editor.focus();
+  if (mode === "split") requestAnimationFrame(updateSplitLayout);
   if (mode !== "editing") renderPreview();
+}
+
+function updatePaneOrder() {
+  const editorRight = state.editorSide === "right";
+  elements.contentPanes.classList.toggle("editor-right", editorRight);
+  elements.paneSwap.setAttribute("aria-pressed", String(editorRight));
+  const label = editorRight ? "把编辑区移到左侧" : "把编辑区移到右侧";
+  elements.paneSwap.title = label;
+  elements.paneSwap.setAttribute("aria-label", label);
+}
+
+function swapPaneSides() {
+  state.editorSide = state.editorSide === "left" ? "right" : "left";
+  localStorage.setItem("lightmark-editor-side", state.editorSide);
+  updatePaneOrder();
+  updateSplitLayout();
+  elements.editor.focus();
+}
+
+function splitMetrics() {
+  const total = Math.max(0, elements.contentPanes.clientWidth - SPLIT_DIVIDER_WIDTH);
+  const editorMinimum = Math.min(280, total / 2);
+  const previewMinimum = Math.min(320, total / 2);
+  return { total, editorMinimum, previewMinimum };
+}
+
+function setSplitFromLeftWidth(leftWidth, { persist = false } = {}) {
+  const { total, editorMinimum, previewMinimum } = splitMetrics();
+  if (total <= 0) return;
+  const firstMinimum = state.editorSide === "left" ? editorMinimum : previewMinimum;
+  const secondMinimum = state.editorSide === "left" ? previewMinimum : editorMinimum;
+  const boundedLeft = Math.min(total - secondMinimum, Math.max(firstMinimum, leftWidth));
+  const editorWidth = state.editorSide === "left" ? boundedLeft : total - boundedLeft;
+  state.editorSplitRatio = Math.min(0.75, Math.max(0.25, editorWidth / total));
+  elements.contentPanes.style.setProperty("--split-left-width", `${Math.round(boundedLeft)}px`);
+  elements.splitResizer.setAttribute("aria-valuenow", String(Math.round(state.editorSplitRatio * 100)));
+  elements.splitResizer.setAttribute("aria-valuetext", `编辑区 ${Math.round(state.editorSplitRatio * 100)}%`);
+  if (persist) localStorage.setItem("lightmark-editor-split-ratio", String(state.editorSplitRatio));
+}
+
+function updateSplitLayout() {
+  const { total } = splitMetrics();
+  if (total <= 0) return;
+  const leftRatio = state.editorSide === "left" ? state.editorSplitRatio : 1 - state.editorSplitRatio;
+  setSplitFromLeftWidth(total * leftRatio);
+}
+
+function updateSidebarWidth(width = state.sidebarWidth, { persist = false } = {}) {
+  const workspaceLimit = Math.max(SIDEBAR_MIN_WIDTH, elements.workspace.clientWidth - 360);
+  state.sidebarWidth = Math.min(SIDEBAR_MAX_WIDTH, workspaceLimit, Math.max(SIDEBAR_MIN_WIDTH, width));
+  document.documentElement.style.setProperty("--sidebar-width", `${Math.round(state.sidebarWidth)}px`);
+  elements.sidebarResizer.setAttribute("aria-valuenow", String(Math.round(state.sidebarWidth)));
+  if (persist) localStorage.setItem("lightmark-sidebar-width", String(state.sidebarWidth));
+}
+
+function beginResize(resizer, className, onMove, onFinish) {
+  return (event) => {
+    if (event.button !== 0 || matchMedia("(max-width: 720px)").matches) return;
+    event.preventDefault();
+    resizer.setPointerCapture(event.pointerId);
+    resizer.classList.add("active");
+    elements.workspace.classList.add("is-resizing", className);
+    const move = (moveEvent) => onMove(moveEvent);
+    const finish = (finishEvent) => {
+      if (resizer.hasPointerCapture(finishEvent.pointerId)) resizer.releasePointerCapture(finishEvent.pointerId);
+      resizer.classList.remove("active");
+      elements.workspace.classList.remove("is-resizing", className);
+      resizer.removeEventListener("pointermove", move);
+      resizer.removeEventListener("pointerup", finish);
+      resizer.removeEventListener("pointercancel", finish);
+      onFinish();
+    };
+    resizer.addEventListener("pointermove", move);
+    resizer.addEventListener("pointerup", finish);
+    resizer.addEventListener("pointercancel", finish);
+  };
+}
+
+function syncPreviewToEditor() {
+  if (state.mode !== "split" || !state.rendererReady) return;
+  cancelAnimationFrame(state.previewScrollFrame);
+  state.previewScrollFrame = requestAnimationFrame(() => {
+    const editorRange = Math.max(1, elements.editor.scrollHeight - elements.editor.clientHeight);
+    const ratio = Math.min(1, Math.max(0, elements.editor.scrollTop / editorRange));
+    const previewWindow = elements.preview.contentWindow;
+    const previewDocument = elements.preview.contentDocument;
+    const scroller = previewDocument?.scrollingElement;
+    const previewRange = Math.max(0, (scroller?.scrollHeight || 0) - (previewWindow?.innerHeight || 0));
+    previewWindow?.scrollTo({ top: ratio * previewRange, behavior: "auto" });
+  });
 }
 
 const formatToolDetails = {
@@ -339,6 +508,7 @@ function handleFormatToolClick(tool) {
 function toggleSidebar() {
   const collapsed = elements.sidebar.classList.toggle("collapsed");
   elements.expandSidebar.classList.toggle("visible", collapsed);
+  if (!collapsed) requestAnimationFrame(() => updateSidebarWidth());
 }
 
 function applyTheme(theme) {
@@ -396,8 +566,12 @@ async function showError(title, error) {
 
 elements.editor.addEventListener("input", () => {
   setDirty(elements.editor.value !== state.lastSavedText);
+  renderOutline();
   renderPreview();
 });
+elements.editor.addEventListener("scroll", syncPreviewToEditor, { passive: true });
+elements.editor.addEventListener("keyup", syncPreviewToEditor);
+elements.editor.addEventListener("click", syncPreviewToEditor);
 elements.editor.addEventListener("mouseup", () => {
   if (state.formatTool && elements.editor.selectionStart !== elements.editor.selectionEnd) {
     requestAnimationFrame(() => applyEditorFormat(state.formatTool));
@@ -412,6 +586,45 @@ elements.next.addEventListener("click", () => navigate(1).catch((error) => showE
 elements.modeButtons.forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
 elements.collapseSidebar.addEventListener("click", toggleSidebar);
 elements.expandSidebar.addEventListener("click", toggleSidebar);
+elements.documentsTab.addEventListener("click", () => setSidebarView("documents"));
+elements.outlineTab.addEventListener("click", () => setSidebarView("outline"));
+elements.paneSwap.addEventListener("click", swapPaneSides);
+elements.sidebarResizer.addEventListener("pointerdown", beginResize(
+  elements.sidebarResizer,
+  "is-resizing-sidebar",
+  (event) => {
+    const workspaceLeft = elements.workspace.getBoundingClientRect().left;
+    updateSidebarWidth(event.clientX - workspaceLeft);
+  },
+  () => updateSidebarWidth(state.sidebarWidth, { persist: true }),
+));
+elements.splitResizer.addEventListener("pointerdown", beginResize(
+  elements.splitResizer,
+  "is-resizing-split",
+  (event) => {
+    const panesLeft = elements.contentPanes.getBoundingClientRect().left;
+    setSplitFromLeftWidth(event.clientX - panesLeft);
+  },
+  () => setSplitFromLeftWidth(
+    elements.splitResizer.getBoundingClientRect().left - elements.contentPanes.getBoundingClientRect().left,
+    { persist: true },
+  ),
+));
+elements.sidebarResizer.addEventListener("keydown", (event) => {
+  const changes = { ArrowLeft: -12, ArrowRight: 12, Home: SIDEBAR_MIN_WIDTH, End: SIDEBAR_MAX_WIDTH };
+  if (!(event.key in changes)) return;
+  event.preventDefault();
+  const width = event.key === "Home" || event.key === "End" ? changes[event.key] : state.sidebarWidth + changes[event.key];
+  updateSidebarWidth(width, { persist: true });
+});
+elements.splitResizer.addEventListener("keydown", (event) => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const { total } = splitMetrics();
+  const currentLeft = (state.editorSide === "left" ? state.editorSplitRatio : 1 - state.editorSplitRatio) * total;
+  const nextLeft = event.key === "Home" ? total * 0.25 : event.key === "End" ? total * 0.75 : currentLeft + (event.key === "ArrowLeft" ? -16 : 16);
+  setSplitFromLeftWidth(nextLeft, { persist: true });
+});
 elements.themeToggle.addEventListener("click", cycleTheme);
 elements.syntaxHelp.addEventListener("click", showSyntaxGuide);
 for (const [tool, details] of Object.entries(formatToolDetails)) {
@@ -494,6 +707,8 @@ getCurrentWindow().onCloseRequested((event) => {
 
 async function start() {
   applyTheme(state.theme);
+  updateSidebarWidth();
+  updatePaneOrder();
   setMode("reading");
   await prepareRenderer();
   try {
@@ -504,5 +719,10 @@ async function start() {
     await showError("无法处理启动文件", error);
   }
 }
+
+new ResizeObserver(() => {
+  updateSidebarWidth();
+  updateSplitLayout();
+}).observe(elements.workspace);
 
 start();
