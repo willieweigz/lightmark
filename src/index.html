@@ -44,9 +44,17 @@
             </div>
             <button id="collapse-sidebar" class="icon-button collapse-button" aria-label="收起文档列表" title="收起文档列表（Ctrl+\\）">‹</button>
           </div>
+          <div class="sidebar-tabs" role="tablist" aria-label="侧栏内容">
+            <button id="documents-tab" class="sidebar-tab active" type="button" role="tab" aria-selected="true" aria-controls="document-list">文档</button>
+            <button id="outline-tab" class="sidebar-tab" type="button" role="tab" aria-selected="false" aria-controls="outline-list">本文目录</button>
+          </div>
           <nav id="document-list" class="document-list" aria-label="同文件夹 Markdown 文档"></nav>
+          <nav id="outline-list" class="outline-list" aria-label="本文标题目录" hidden></nav>
           <p id="empty-list" class="empty-list">打开一个 Markdown 文件或文件夹开始阅读。</p>
+          <p id="empty-outline" class="empty-list" hidden>本文还没有 Markdown 标题。</p>
         </aside>
+
+        <div id="sidebar-resizer" class="pane-resizer sidebar-resizer" role="separator" tabindex="0" aria-label="调整文档列表宽度" aria-orientation="vertical" aria-valuemin="190" aria-valuemax="420" aria-valuenow="268"></div>
 
         <button id="expand-sidebar" class="expand-sidebar" aria-label="展开文档列表" title="展开文档列表（Ctrl+\\）">›</button>
 
@@ -72,9 +80,11 @@
                   <span>红色笔</span>
                 </button>
                 <span id="formatting-hint" class="formatting-hint" aria-live="polite">先选中文字再点按钮，或先开启画笔再拖选</span>
+                <button id="pane-swap" class="pane-swap" type="button" aria-pressed="false" title="把编辑区移到右侧">⇄ 换边</button>
               </div>
               <textarea id="editor" spellcheck="false" aria-label="Markdown 编辑器" placeholder="在这里输入 Markdown…"></textarea>
             </div>
+            <div id="split-resizer" class="pane-resizer split-resizer" role="separator" tabindex="0" aria-label="调整编辑区与预览区宽度" aria-orientation="vertical" aria-valuemin="25" aria-valuemax="75" aria-valuenow="44"></div>
             <div id="preview-pane" class="pane preview-pane" aria-label="Markdown 预览">
               <iframe id="preview" title="Markdown 预览" sandbox="allow-scripts allow-same-origin"></iframe>
               <div id="preview-loading" class="preview-loading">正在准备离线渲染器…</div>
@@ -107,6 +117,7 @@
           <article data-search="粗体 斜体 删除线 text"><h3>文字</h3><code>**粗体**<br>*斜体*<br>~~删除线~~</code></article>
           <article data-search="黄色 高光 高亮 highlight mark 背景"><h3>黄色高光</h3><code>&lt;mark&gt;需要高光的文字&lt;/mark&gt;</code></article>
           <article data-search="红色 文字 红笔 red color"><h3>红色文字</h3><code>&lt;span class=&quot;text-red&quot;&gt;红色文字&lt;/span&gt;</code></article>
+          <article data-search="段落 空行 换行 回车 段首 缩进 空格 paragraph line break indent"><h3>段落与换行</h3><code>第一段文字<br><br>第二段文字<br><br>行尾两个空格  <br>只换行，不分段<br><br>　　中文段首用两个全角空格</code><p class="syntax-note">行首 4 个半角空格会变成代码块，不是首行缩进。</p></article>
           <article data-search="列表 list"><h3>列表</h3><code>- 无序列表<br>1. 有序列表</code></article>
           <article data-search="任务 列表 task checkbox"><h3>任务列表</h3><code>- [ ] 待完成<br>- [x] 已完成</code></article>
           <article data-search="引用 quote"><h3>引用</h3><code>&gt; 引用内容</code></article>

@@ -31,6 +31,80 @@ export function directoryFromPath(path) {
   return index >= 0 ? normalized.slice(0, index) : "";
 }
 
+function plainHeadingText(value) {
+  return value
+    .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
+    .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?]]/g, (_, target, label) => label || target)
+    .replace(/<[^>]+>/g, "")
+    .replace(/[*_~`]/g, "")
+    .trim();
+}
+
+export function extractHeadings(source) {
+  const headings = [];
+  let fence = null;
+  let frontmatter = false;
+  let previousLine = null;
+  let lineNumber = 0;
+
+  for (const match of source.matchAll(/[^\r\n]*(?:\r\n|\r|\n|$)/g)) {
+    if (!match[0]) break;
+    const line = match[0].replace(/(?:\r\n|\r|\n)$/, "");
+    const normalizedLine = line.replace(/^\uFEFF/, "").trim();
+    if (lineNumber === 0 && normalizedLine === "---") {
+      frontmatter = true;
+      previousLine = null;
+      lineNumber += 1;
+      continue;
+    }
+    if (frontmatter) {
+      if (normalizedLine === "---") frontmatter = false;
+      previousLine = null;
+      lineNumber += 1;
+      continue;
+    }
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1];
+      if (!fence) fence = { character: marker[0], length: marker.length };
+      else if (marker[0] === fence.character && marker.length >= fence.length) fence = null;
+      previousLine = null;
+      lineNumber += 1;
+      continue;
+    }
+    if (fence) {
+      previousLine = null;
+      lineNumber += 1;
+      continue;
+    }
+
+    const atx = line.match(/^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$/);
+    if (atx) {
+      const title = plainHeadingText(atx[2].replace(/[ \t]+#+[ \t]*$/, ""));
+      if (title) headings.push({ level: atx[1].length, title, offset: match.index, line: lineNumber });
+      previousLine = null;
+      lineNumber += 1;
+      continue;
+    }
+
+    const setext = line.match(/^ {0,3}(=+|-+)[ \t]*$/);
+    if (setext && previousLine?.text.trim()) {
+      const title = plainHeadingText(previousLine.text);
+      if (title) headings.push({
+        level: setext[1][0] === "=" ? 1 : 2,
+        title,
+        offset: previousLine.offset,
+        line: previousLine.line,
+      });
+      previousLine = null;
+    } else {
+      previousLine = { text: line, offset: match.index, line: lineNumber };
+    }
+    lineNumber += 1;
+  }
+  return headings;
+}
+
 const inlineFormats = Object.freeze({
   highlight: { opening: "<mark>", closing: "</mark>" },
   redText: { opening: '<span class="text-red">', closing: "</span>" },

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   directoryFromPath,
+  extractHeadings,
   fileNameFromPath,
   formatSelection,
   isExternalUrl,
@@ -42,6 +43,18 @@ describe("Markdown document helpers", () => {
     assert.equal(isRelativeImageSource("images/示例.png"), true);
     assert.equal(isRelativeImageSource("https://example.com/image.png"), false);
     assert.equal(isRelativeImageSource("data:image/png;base64,AA=="), false);
+  });
+
+  it("extracts a hierarchical outline while ignoring fenced code headings", () => {
+    const source = "# 第一章\r\n\r\n## [第二节](chapter.md)\r\n\r\n```md\r\n# 代码里的标题\r\n```\r\n\r\n补充标题\r\n---\r\n";
+    assert.deepEqual(extractHeadings(source), [
+      { level: 1, title: "第一章", offset: 0, line: 0 },
+      { level: 2, title: "第二节", offset: 9, line: 2 },
+      { level: 2, title: "补充标题", offset: 57, line: 8 },
+    ]);
+    assert.deepEqual(extractHeadings("---\ntitle: 不应成为标题\ntags: [测试]\n---\n# 正文标题\n"), [
+      { level: 1, title: "正文标题", offset: 33, line: 4 },
+    ]);
   });
 
   it("adds and removes yellow highlight markup around selected text", () => {
