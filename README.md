@@ -36,14 +36,16 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 | Windows 11 | Tauri 2 | WebView2 | NSIS `.exe` 安装包 |
 | macOS | AppKit | WKWebView | 原生 `.app` |
 
-两端共用 `Resources/` 中的 GFM 排版、marked 和 DOMPurify 离线渲染资源，同时保留各自的原生窗口、菜单、文件操作与系统主题体验。
+两端共用 `Resources/` 中的 GFM 排版、marked 和 DOMPurify 离线渲染资源，同时保留各自的原生窗口、菜单、文件操作与系统主题体验。Windows 的界面交互位于 `src/`，macOS 的界面交互位于 `Sources/`；新增界面功能需要分别实现和验收，不会仅因共用渲染器而自动同步。
 
 ## 功能
 
 - 阅读、编辑、实时分栏预览三种模式
 - 分栏模式可一键交换编辑区与预览区；文档列表和中间分隔条均可拖动，并记住上次宽度与位置
-- 分栏编辑采用标题/内容锚点同步预览；手动微调预览后会保留对齐偏移，不再按总高度百分比跳回
+- 分栏编辑可选择“自动锚点 / 手动校准 / 关闭同步”；手动移动预览后会保留位置差，也可随时“重新对齐”
+- 长文档在普通窗口、Windows 最大化和全屏幕下都会占满可用内容高度
 - 编辑工具栏提供浅黄色高光和红色文字笔；可先选中文字再点击，也可先开启画笔再拖选文字
+- 编辑时输入 `<` 会出现受控的安全候选，可插入 `<br>`、`<br><br>`、黄色高光和红色文字格式
 - Windows 提供 Markdown 原文、纯文本和富文本三种整篇复制；富文本可粘贴到 Word 等应用并保留排版
 - Windows 支持工具栏或 F11 进入全屏幕，并用 Ctrl+F 查找当前文档文字
 - 打开单个 `.md` / `.markdown`，或打开整个文件夹
@@ -56,7 +58,7 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 - 相对路径本地图片、Obsidian `![[asset/图片.png|宽度]]` 图片、外部链接，以及可点击跳转的相对 Markdown 链接与 `[[Wiki Link]]`
 - Obsidian Callout 全部内置类型与别名、自定义标题、默认展开或收起、多层嵌套
 - YAML Frontmatter 折叠显示、`[[Wiki Link]]` 友好显示
-- Markdown 语法速查提供可直接复制的格式模板，包含完整 Callout、中文段首空两格和明显空白行
+- Markdown 语法速查提供可直接复制的格式模板，包含完整 Callout，以及只复制符号本身的 `&emsp;&emsp;`、两个全角空格、`<br>` 和 `<br><br>`
 - 跟随系统浅色/深色外观；Windows 还可临时切换主题
 - Windows 单实例运行，并注册 `.md` / `.markdown`“打开方式”
 - marked 与 DOMPurify 随应用打包，全程离线渲染

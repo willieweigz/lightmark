@@ -107,9 +107,19 @@
                   <span>红色笔</span>
                 </button>
                 <span id="formatting-hint" class="formatting-hint" aria-live="polite">先选中文字再点按钮，或先开启画笔再拖选</span>
+                <div class="sync-controls" aria-label="编辑与预览滚动同步">
+                  <label for="sync-mode">同步</label>
+                  <select id="sync-mode" title="选择编辑区与预览区的滚动关系" disabled>
+                    <option value="auto">自动锚点</option>
+                    <option value="manual">手动校准</option>
+                    <option value="off">关闭</option>
+                  </select>
+                  <button id="reset-sync" class="sync-reset" type="button" title="清除手动位置差并按内容重新对齐" disabled>重新对齐</button>
+                </div>
                 <button id="pane-swap" class="pane-swap" type="button" aria-pressed="false" title="把编辑区移到右侧">⇄ 换边</button>
               </div>
               <textarea id="editor" spellcheck="false" aria-label="Markdown 编辑器" placeholder="在这里输入 Markdown…"></textarea>
+              <div id="html-completion" class="html-completion" role="listbox" aria-label="安全格式候选" hidden></div>
             </div>
             <div id="split-resizer" class="pane-resizer split-resizer" role="separator" tabindex="0" aria-label="调整编辑区与预览区宽度" aria-orientation="vertical" aria-valuemin="25" aria-valuemax="75" aria-valuenow="44"></div>
             <div id="preview-pane" class="pane preview-pane" aria-label="Markdown 预览">
@@ -144,9 +154,12 @@
           <article class="syntax-wide" data-syntax="paragraph">
             <h3>段首空格与空白行</h3>
             <div class="paragraph-cases">
-              <section class="paragraph-case"><h4>1. 段首空两格</h4><code>　　正文从这里开始</code><p>开头输入两个中文全角空格，不要用半角空格。</p></section>
-              <section class="paragraph-case"><h4>2. 空出一整行</h4><code>上一段文字<br>&lt;br&gt;&lt;br&gt;<br>下一段文字</code><p>需要明显留白时使用 &lt;br&gt;&lt;br&gt;；连续按很多次 Enter 也不会越空越宽。</p></section>
+              <section class="paragraph-case"><h4>1. HTML 段首空两格</h4><code>&amp;emsp;&amp;emsp;</code><p>可直接选中复制；预览时会变成两个较宽的空格。</p></section>
+              <section class="paragraph-case"><h4>2. 中文全角空格</h4><code class="visible-spaces">［<span>　　</span>］</code><p>方括号中是两个真正的全角空格，不依赖 HTML 实体。</p></section>
+              <section class="paragraph-case"><h4>3. 只换下一行</h4><code>&lt;br&gt;</code><p>需要强制换到下一行时使用。</p></section>
+              <section class="paragraph-case"><h4>4. 空出一整行</h4><code>&lt;br&gt;&lt;br&gt;</code><p>需要明显留白时使用；连续按很多次 Enter 不会越空越宽。</p></section>
             </div>
+            <p class="syntax-note">这些是 Markdown 中常用的内嵌 HTML；其他平台是否支持，取决于该平台的渲染规则。</p>
           </article>
           <article data-syntax="list"><h3>列表</h3><code>- 无序列表<br>1. 有序列表<br>&nbsp;&nbsp;- 嵌套项目</code></article>
           <article data-syntax="task"><h3>任务列表</h3><code>- [ ] 待完成<br>- [x] 已完成</code></article>

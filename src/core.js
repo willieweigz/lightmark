@@ -61,6 +61,37 @@ export function mapScrollByAnchors(position, anchors) {
   return anchors[anchors.length - 1].preview;
 }
 
+export function findHtmlCompletionContext(source, cursor) {
+  if (!Number.isInteger(cursor) || cursor < 0 || cursor > source.length) return null;
+  const lineStart = Math.max(source.lastIndexOf("\n", cursor - 1), source.lastIndexOf("\r", cursor - 1)) + 1;
+  const fragment = source.slice(lineStart, cursor);
+  const match = fragment.match(/<([a-z]*)$/i);
+  if (!match) return null;
+  const start = lineStart + match.index;
+  if (start > 0 && source[start - 1] === "<") return null;
+  return { start, end: cursor, query: match[1].toLocaleLowerCase() };
+}
+
+export function applyTextCompletion(source, context, completion) {
+  const validContext = context
+    && Number.isInteger(context.start)
+    && Number.isInteger(context.end)
+    && context.start >= 0
+    && context.end >= context.start
+    && context.end <= source.length;
+  if (!validContext || typeof completion?.text !== "string") {
+    return { text: source, applied: false };
+  }
+  const selectionStart = context.start + (completion.selectionStart ?? completion.text.length);
+  const selectionEnd = context.start + (completion.selectionEnd ?? completion.selectionStart ?? completion.text.length);
+  return {
+    text: source.slice(0, context.start) + completion.text + source.slice(context.end),
+    selectionStart,
+    selectionEnd,
+    applied: true,
+  };
+}
+
 function plainHeadingText(value) {
   return value
     .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")

@@ -10,6 +10,7 @@ const secondaryDocumentPath = process.env.LIGHTMARK_E2E_SECONDARY_DOCUMENT;
 const screenshotPath = resolve("work", "lightmark-windows-acceptance.png");
 const syntaxScreenshotPath = resolve("work", "lightmark-callout-guide.png");
 const formattingScreenshotPath = resolve("work", "lightmark-formatting-tools.png");
+const fullscreenScreenshotPath = resolve("work", "lightmark-long-document-fullscreen.png");
 
 if (!savedDocumentPath) {
   throw new Error("LIGHTMARK_E2E_DOCUMENT is required");
@@ -23,10 +24,12 @@ async function text(locator) {
   return (await locator.textContent())?.trim() || "";
 }
 
-const browser = await chromium.connectOverCDP(endpoint);
+console.log(`连接 WebView2：${endpoint}`);
+const browser = await chromium.connectOverCDP(endpoint, { timeout: 10_000 });
 const pages = browser.contexts().flatMap((context) => context.pages());
 const page = pages.find((candidate) => /tauri|localhost/i.test(candidate.url())) || pages[0];
 assert(page, "没有找到轻阅 Markdown 的 WebView2 页面");
+page.setDefaultTimeout(10_000);
 const pageErrors = [];
 page.on("pageerror", (error) => pageErrors.push(error.message));
 
@@ -40,7 +43,10 @@ await page.locator(".document-item").first().click();
 await page.locator("#page-indicator").filter({ hasText: "1 / 3" }).waitFor();
 
 const results = [];
-const record = (name, details = "通过") => results.push({ name, details });
+const record = (name, details = "通过") => {
+  results.push({ name, details });
+  console.log(`✓ ${name}`);
+};
 
 const names = await page.locator(".document-name").allTextContents();
 assert(JSON.stringify(names) === JSON.stringify(["01-第一页.md", "02-第二页.md", "10-第十页.md"]), `自然排序错误：${names.join(" → ")}`);
@@ -63,6 +69,7 @@ assert(await preview.locator("table").count() === 1, "表格未渲染");
 assert(await preview.locator("pre code").count() >= 1, "代码块未渲染");
 assert(await preview.locator(".callout").count() >= 3, "Callout 未渲染");
 assert(await preview.locator(".frontmatter").count() === 1, "Frontmatter 未渲染");
+await preview.locator(".wikilink").first().waitFor();
 assert(await preview.locator(".wikilink").count() === 1, "Wiki Link 未渲染");
 const imageSource = await preview.locator("img[alt='轻阅 Markdown 离线图片']").getAttribute("src");
 assert(imageSource?.startsWith("data:image/svg+xml;base64,"), "相对路径图片未通过 Rust 从磁盘离线加载");
@@ -191,13 +198,49 @@ assert(redColor !== highlightStyle.color, "红色文字没有显示为红色");
   await page.screenshot({ path: formattingScreenshotPath });
   record("黄色高光与红色笔：按钮应用、画笔拖选、代码写入和实时预览");
 
-  await editor.press("Control+Home");
+  await editor.evaluate((element) => {
+    element.value += "\n\n<";
+    element.focus();
+    element.setSelectionRange(element.value.length, element.value.length);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.locator("#html-completion").waitFor({ state: "visible" });
+  assert(await page.locator("#html-completion button").count() === 4, "输入 < 后没有显示四个安全格式候选");
+  await editor.press("ArrowDown");
+  await editor.press("Enter");
+  assert((await editor.inputValue()).endsWith("<br><br>"), "方向键与 Enter 没有插入选中的空白行格式");
+  await editor.evaluate((element) => {
+    element.value += "\n<ma";
+    element.focus();
+    element.setSelectionRange(element.value.length, element.value.length);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  assert(await page.locator("#html-completion button").count() === 1, "输入 <ma 后没有筛选到高光格式");
+  await editor.press("Enter");
+  assert(await editor.evaluate((element) => element.value.slice(element.selectionStart, element.selectionEnd)) === "高光文字", "插入高光格式后没有选中可替换文字");
+  record("尖括号安全候选：筛选、方向键、Enter 插入与自动选中示例文字");
+
+  const syncOriginal = await editor.inputValue();
+  await editor.evaluate((element) => {
+    element.value += Array.from({ length: 70 }, (_, index) => `\n\n## 长文同步验收 ${index + 1}\n${"这是用于验证不同字体、行高和标题位置下滚动同步的长段落。\n\n".repeat(3)}`).join("");
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await preview.getByText("长文同步验收 70", { exact: true }).waitFor();
+  await page.waitForFunction(() => [...(document.querySelector("#preview")?.contentDocument?.images || [])].every((image) => image.complete));
+  await page.locator("#sync-mode").selectOption("auto");
+  await editor.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll"));
+  });
   await page.waitForFunction(() => {
     const frame = document.querySelector("#preview")?.contentWindow;
     const scroller = frame?.document.scrollingElement;
     return !scroller || frame.scrollY / Math.max(1, scroller.scrollHeight - frame.innerHeight) < 0.12;
   });
-  await editor.press("Control+End");
+  await editor.evaluate((element) => {
+    element.scrollTop = element.scrollHeight - element.clientHeight;
+    element.dispatchEvent(new Event("scroll"));
+  });
   await page.waitForFunction(() => {
     const frame = document.querySelector("#preview")?.contentWindow;
     const scroller = frame?.document.scrollingElement;
@@ -206,27 +249,49 @@ assert(redColor !== highlightStyle.color, "红色文字没有显示为红色");
   record("分栏编辑滚动时预览自动同步跟随");
 
   await editor.evaluate((element) => {
-    element.scrollTop = (element.scrollHeight - element.clientHeight) * 0.45;
+    element.scrollTop = (element.scrollHeight - element.clientHeight) * 0.35;
     element.dispatchEvent(new Event("scroll"));
   });
-  await page.waitForTimeout(180);
+  await page.waitForTimeout(240);
   const automaticPreviewY = await preview.locator("body").evaluate(() => window.scrollY);
   const previewRangeForAlignment = await preview.locator("body").evaluate(() => Math.max(0, document.scrollingElement.scrollHeight - innerHeight));
   assert(previewRangeForAlignment > automaticPreviewY + 100, "测试文档预览空间不足，无法验证手动对齐偏移");
+  await page.locator("#sync-mode").selectOption("manual");
   await preview.locator("body").evaluate((_, target) => window.scrollTo(0, target), automaticPreviewY + 80);
-  await page.waitForTimeout(180);
+  await page.waitForTimeout(240);
   const manuallyAlignedY = await preview.locator("body").evaluate(() => window.scrollY);
+  const storedAlignment = Number(await page.locator("#reset-sync").getAttribute("data-offset"));
+  assert(await page.locator("#reset-sync").isEnabled(), "手动校准后重新对齐按钮没有启用");
   await editor.evaluate((element) => {
-    element.scrollTop += 12;
+    element.scrollTop += Math.min(80, (element.scrollHeight - element.clientHeight) * 0.05);
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForTimeout(240);
+  const previewAfterEditorMove = await preview.locator("body").evaluate(() => window.scrollY);
+  await page.locator("#reset-sync").click();
+  await page.waitForTimeout(240);
+  const previewAfterReset = await preview.locator("body").evaluate(() => window.scrollY);
+  assert(Math.abs((previewAfterEditorMove - previewAfterReset) - storedAlignment) < 4, `手动校准没有持续保留：保存 ${storedAlignment}，实际 ${previewAfterEditorMove - previewAfterReset}`);
+
+  await page.locator("#sync-mode").selectOption("off");
+  await preview.locator("body").evaluate(() => window.scrollTo(0, 30));
+  await editor.evaluate((element) => {
+    element.scrollTop = Math.max(0, element.scrollTop - 40);
     element.dispatchEvent(new Event("scroll"));
   });
   await page.waitForTimeout(220);
-  const previewAfterEditorMove = await preview.locator("body").evaluate(() => window.scrollY);
-  assert(previewAfterEditorMove >= manuallyAlignedY - 4, `手动对齐被编辑区滚动覆盖：${manuallyAlignedY} → ${previewAfterEditorMove}`);
-  assert(previewAfterEditorMove - manuallyAlignedY < 80, "编辑区小幅移动导致预览大幅跳动");
-  record("标题锚点同步与手动微调后的对齐偏移保留");
+  assert(Math.abs(await preview.locator("body").evaluate(() => window.scrollY) - 30) < 3, "关闭同步后预览仍被编辑区带动");
+  await page.locator("#sync-mode").selectOption("auto");
+  await editor.evaluate((element, value) => {
+    element.value = value;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  }, syncOriginal);
+  record("长文自动锚点、手动校准持续保留、重新对齐与关闭同步");
 
-  await editor.press("Control+End");
+  await editor.evaluate((element) => {
+    element.scrollTop = element.scrollHeight - element.clientHeight;
+    element.dispatchEvent(new Event("scroll"));
+  });
 await editor.type("\n\n## Ctrl+S 验收\n已从磁盘真实回读。\n\n<script>window.__lightmarkPwned = true</script>\n<img src=\"missing.png\" onerror=\"window.__lightmarkPwned=true\">", { delay: 1 });
 await page.getByRole("button", { name: "分栏" }).click();
 await preview.getByText("Ctrl+S 验收", { exact: true }).waitFor();
@@ -277,7 +342,7 @@ await page.locator("#syntax-help").click();
 await page.locator("#syntax-dialog").waitFor({ state: "visible" });
   assert(await page.locator("#syntax-grid article").count() === 18, "语法速查条目不完整");
   assert(await page.locator("#syntax-search").count() === 0, "语法速查仍保留了不需要的搜索框");
-  assert(await page.locator(".syntax-copy-button").count() === 31, "语法复制模板数量不完整");
+  assert(await page.locator(".syntax-copy-button").count() === 33, "语法复制模板数量不完整");
 const calloutGuide = await text(page.locator("#syntax-grid article[data-syntax='callout']"));
 assert(calloutGuide.includes("Callout"), "语法速查缺少 Callout");
 assert(["note", "abstract", "info", "todo", "tip", "success", "question", "warning", "failure", "danger", "bug", "example", "quote"].every((type) => calloutGuide.includes(type)), "语法速查缺少官方 Callout 类型");
@@ -287,10 +352,9 @@ assert(["summary", "tldr", "hint", "important", "check", "done", "help", "faq", 
   await page.locator("#syntax-grid article[data-syntax='callout'] .syntax-copy-button.copied").waitFor();
   await page.screenshot({ path: syntaxScreenshotPath });
   const paragraphGuide = await text(page.locator("#syntax-grid article[data-syntax='paragraph']"));
-  assert(["段首空两格", "空出一整行"].every((label) => paragraphGuide.includes(label)), "段落速查缺少段首缩进或明显留白");
-  assert(!paragraphGuide.includes("另起一段") && !paragraphGuide.includes("只换下一行"), "段落速查保留了不需要的普通编辑说明");
-  assert(paragraphGuide.includes("两个中文全角空格") && paragraphGuide.includes("不要用半角空格"), "语法速查缺少中文段首缩进提醒");
-  assert(paragraphGuide.includes("<br><br>") && paragraphGuide.includes("连续按很多次 Enter"), "语法速查缺少明显留白说明");
+  assert(["&emsp;&emsp;", "<br>", "<br><br>", "两个真正的全角空格"].every((label) => paragraphGuide.includes(label)), "段落速查缺少原样显示的缩进或换行符号");
+  const paragraphCopyValues = await page.locator("#syntax-grid article[data-syntax='paragraph'] .syntax-copy-button").evaluateAll((buttons) => buttons.map((button) => button.dataset.copyText));
+  assert(JSON.stringify(paragraphCopyValues) === JSON.stringify(["&emsp;&emsp;", "　　", "<br>", "<br><br>"]), "段落按钮夹带了示例文字或复制值错误");
   assert(await page.locator("#syntax-grid article[data-syntax='inline-code']").count() === 1, "语法速查缺少行内代码");
   assert(await page.locator("#syntax-grid article[data-syntax='divider']").count() === 1, "语法速查缺少分隔线与转义");
   assert(await page.locator("#syntax-grid article[data-syntax='obsidian-image']").count() === 1, "语法速查缺少 Obsidian 图片");
@@ -305,11 +369,55 @@ await page.locator("#theme-toggle").click();
 assert(await page.locator("html").getAttribute("data-theme") === null, "未恢复跟随系统主题");
   record("浅色、深色与跟随 Windows 系统主题");
 
+await page.getByRole("button", { name: "分栏", exact: true }).click();
+const fullscreenOriginal = await editor.inputValue();
+await editor.evaluate((element) => {
+  const sections = Array.from({ length: 90 }, (_, index) => `\n\n## 长文全屏验收 ${index + 1}\n${"这是一段用于验证 Windows 最大窗口与全屏内容区高度的长文字。\n\n".repeat(3)}`).join("");
+  element.value += sections;
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+});
+await preview.getByText("长文全屏验收 90", { exact: true }).waitFor();
+const normalLayout = await page.evaluate(() => ({
+  viewport: innerHeight,
+  panes: document.querySelector("#content-panes").getBoundingClientRect().height,
+  status: document.querySelector(".statusbar").getBoundingClientRect().height,
+}));
+assert(normalLayout.panes > normalLayout.viewport - 180, `普通窗口内容区没有占满高度：${JSON.stringify(normalLayout)}`);
+assert(Math.abs(normalLayout.status - 30) < 1, `普通窗口状态栏高度错误：${normalLayout.status}`);
 await page.locator("#fullscreen-toggle").click();
 await page.locator("#fullscreen-toggle").filter({ hasText: "退出全屏" }).waitFor();
+await page.waitForTimeout(500);
+const fullscreenLayout = await page.evaluate(() => ({
+  viewport: innerHeight,
+  panes: document.querySelector("#content-panes").getBoundingClientRect().height,
+  status: document.querySelector(".statusbar").getBoundingClientRect().height,
+}));
+assert(fullscreenLayout.panes > fullscreenLayout.viewport - 180, `长文全屏内容区没有占满高度：${JSON.stringify(fullscreenLayout)}`);
+assert(fullscreenLayout.panes > normalLayout.panes + 200, "进入全屏后内容区没有随窗口增高");
+assert(Math.abs(fullscreenLayout.status - 30) < 1, `全屏状态栏高度错误：${fullscreenLayout.status}`);
+await page.screenshot({ path: fullscreenScreenshotPath });
 await page.keyboard.press("F11");
 await page.locator("#fullscreen-toggle").filter({ hasText: /^全屏$/ }).waitFor();
-record("全屏按钮与 F11 进入/退出全屏幕");
+await editor.evaluate((element, value) => {
+  element.value = value;
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+}, fullscreenOriginal);
+await page.getByRole("button", { name: "阅读", exact: true }).click();
+record("46 KB 级长文布局回归、全屏按钮与 F11 进入/退出全屏幕", `${Math.round(normalLayout.panes)}px → ${Math.round(fullscreenLayout.panes)}px`);
+
+// 清理仅用于布局验收的临时输入，避免它干扰后面的单实例打开文档测试。
+// 若内容恰好恢复到磁盘版本，产品会直接切换；否则主动选择“不保存”。
+await page.locator("#next-document").click();
+await Promise.race([
+  page.locator("#unsaved-dialog").waitFor({ state: "visible" }),
+  page.locator("#page-indicator").filter({ hasText: "3 / 3" }).waitFor(),
+]);
+if (await page.locator("#unsaved-dialog").isVisible()) {
+  await page.locator("#discard-pending").click();
+}
+await page.locator("#page-indicator").filter({ hasText: "3 / 3" }).waitFor();
+await page.locator(".document-item").filter({ hasText: "02-第二页.md" }).click();
+await page.locator("#page-indicator").filter({ hasText: "2 / 3" }).waitFor();
 
   await page.locator("#sidebar-resizer").focus();
   await page.locator("#sidebar-resizer").press("Home");
@@ -354,6 +462,7 @@ console.log(JSON.stringify({
   screenshotPath,
   syntaxScreenshotPath,
   formattingScreenshotPath,
+  fullscreenScreenshotPath,
   results,
 }, null, 2));
 

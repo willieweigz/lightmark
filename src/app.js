@@ -5,8 +5,10 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { message, open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  applyTextCompletion,
   directoryFromPath,
   extractHeadings,
+  findHtmlCompletionContext,
   findTextMatches,
   fileNameFromPath,
   formatSelection,
@@ -58,11 +60,14 @@ const elements = {
   previewPane: document.querySelector("#preview-pane"),
   splitResizer: document.querySelector("#split-resizer"),
   paneSwap: document.querySelector("#pane-swap"),
+  syncMode: document.querySelector("#sync-mode"),
+  resetSync: document.querySelector("#reset-sync"),
   formattingToolbar: document.querySelector(".formatting-toolbar"),
   highlightTool: document.querySelector("#highlight-tool"),
   redTextTool: document.querySelector("#red-text-tool"),
   formattingHint: document.querySelector("#formatting-hint"),
   editor: document.querySelector("#editor"),
+  htmlCompletion: document.querySelector("#html-completion"),
   preview: document.querySelector("#preview"),
   previewLoading: document.querySelector("#preview-loading"),
   saveStatus: document.querySelector("#save-status"),
@@ -95,8 +100,14 @@ const state = {
   scrollAnchorFrame: 0,
   scrollAnchors: [],
   previewSyncOffset: 0,
-  previewSyncUntil: 0,
+  previewProgrammaticTarget: null,
   previewManualFrame: 0,
+  scrollSyncMode: ["auto", "manual", "off"].includes(localStorage.getItem("lightmark-scroll-sync-mode"))
+    ? localStorage.getItem("lightmark-scroll-sync-mode")
+    : "auto",
+  completionContext: null,
+  completionItems: [],
+  completionIndex: 0,
   sidebarView: "documents",
   copyFeedbackTimer: 0,
   findMatches: [],
@@ -106,6 +117,13 @@ const state = {
 const SIDEBAR_MIN_WIDTH = 190;
 const SIDEBAR_MAX_WIDTH = 420;
 const SPLIT_DIVIDER_WIDTH = 7;
+
+const htmlCompletions = Object.freeze([
+  { key: "br", label: "换到下一行", text: "<br>" },
+  { key: "brbr", label: "空出一整行", text: "<br><br>" },
+  { key: "mark", label: "黄色高光", text: "<mark>高光文字</mark>", selectionStart: 6, selectionEnd: 10 },
+  { key: "span", aliases: ["red"], label: "红色文字", text: '<span class="text-red">红色文字</span>', selectionStart: 23, selectionEnd: 27 },
+]);
 
 const syntaxTemplates = Object.freeze({
   heading: [
@@ -120,8 +138,10 @@ const syntaxTemplates = Object.freeze({
   highlight: [{ label: "黄色高光", text: "<mark>需要高光的文字</mark>" }],
   red: [{ label: "红色文字", text: '<span class="text-red">红色文字</span>' }],
   paragraph: [
-    { label: "段首空两格", text: "　　正文从这里开始" },
-    { label: "空出一整行", text: "上一段文字\n\n<br><br>\n\n下一段文字" },
+    { label: "&emsp;&emsp;", text: "&emsp;&emsp;" },
+    { label: "两个全角空格", text: "　　" },
+    { label: "<br>", text: "<br>" },
+    { label: "<br><br>", text: "<br><br>" },
   ],
   list: [
     { label: "无序列表", text: "- 第一项\n- 第二项" },
@@ -230,7 +250,10 @@ async function renderPreview() {
         documentPath: state.currentPath,
         source,
       });
-      if (generation === state.renderGeneration) image.src = dataUrl;
+      if (generation === state.renderGeneration) {
+        image.src = dataUrl;
+        await image.decode?.().catch(() => {});
+      }
     } catch {
       image.title = `无法加载本地图片：${source}`;
     }
@@ -316,8 +339,9 @@ function renderOutline() {
 
 function scrollPreviewToHeading(index) {
   const heading = elements.preview.contentDocument?.querySelectorAll("h1, h2, h3, h4, h5, h6")[index];
-  state.previewSyncUntil = performance.now() + 140;
-  heading?.scrollIntoView({ block: "start", behavior: "auto" });
+  const previewWindow = elements.preview.contentWindow;
+  if (!heading || !previewWindow) return;
+  setPreviewScroll(heading.getBoundingClientRect().top + previewWindow.scrollY);
 }
 
 function jumpToHeading(heading, index) {
@@ -342,6 +366,7 @@ async function loadDocument(path, { refreshSiblings = false } = {}) {
   state.currentPath = payload.path;
   state.currentDirectory = payload.directory;
   state.previewSyncOffset = 0;
+  state.previewProgrammaticTarget = null;
   state.lastSavedText = payload.contents;
   elements.editor.value = payload.contents;
   renderOutline();
@@ -349,6 +374,7 @@ async function loadDocument(path, { refreshSiblings = false } = {}) {
   elements.title.textContent = payload.name;
   elements.path.textContent = payload.path;
   setDirty(false);
+  updateSyncControls();
   renderDocumentList();
   await renderPreview();
   updateCopyAvailability();
@@ -441,6 +467,54 @@ async function navigate(by) {
   if (destination) await guardUnsaved(() => loadDocument(destination.path));
 }
 
+function updateModeStatus() {
+  if (state.mode === "reading") {
+    elements.modeStatus.textContent = "阅读模式 · ← → 翻页";
+    return;
+  }
+  if (state.mode === "editing") {
+    elements.modeStatus.textContent = "编辑模式 · 方向键移动光标";
+    return;
+  }
+  const labels = {
+    auto: "自动锚点同步",
+    manual: Math.abs(state.previewSyncOffset) > 1 ? "手动校准同步 · 已记住位置" : "手动校准同步",
+    off: "左右独立滚动",
+  };
+  elements.modeStatus.textContent = `分栏模式 · ${labels[state.scrollSyncMode]}`;
+}
+
+function updateSyncControls() {
+  const inSplit = state.mode === "split";
+  elements.syncMode.value = state.scrollSyncMode;
+  elements.syncMode.disabled = !inSplit;
+  elements.resetSync.disabled = !inSplit || state.scrollSyncMode !== "manual" || Math.abs(state.previewSyncOffset) <= 1;
+  elements.resetSync.classList.toggle("calibrated", !elements.resetSync.disabled);
+  elements.resetSync.dataset.offset = String(state.previewSyncOffset);
+  updateModeStatus();
+}
+
+function setScrollSyncMode(mode) {
+  if (!["auto", "manual", "off"].includes(mode)) return;
+  if (mode === "manual" && state.mode === "split") {
+    rebuildScrollAnchors();
+    const actual = elements.preview.contentWindow?.scrollY || 0;
+    state.previewSyncOffset = actual - previewScrollTarget({ includeManualOffset: false });
+  } else if (mode === "auto") {
+    state.previewSyncOffset = 0;
+  }
+  state.scrollSyncMode = mode;
+  localStorage.setItem("lightmark-scroll-sync-mode", mode);
+  updateSyncControls();
+  if (mode !== "off") syncPreviewToEditor();
+}
+
+function resetPreviewAlignment() {
+  state.previewSyncOffset = 0;
+  updateSyncControls();
+  syncPreviewToEditor();
+}
+
 function setMode(mode) {
   const previousMode = state.mode;
   state.mode = mode;
@@ -453,13 +527,10 @@ function setMode(mode) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
-  elements.modeStatus.textContent = mode === "reading"
-    ? "阅读模式 · ← → 翻页"
-    : mode === "editing"
-      ? "编辑模式 · 方向键移动光标"
-      : "分栏模式 · 编辑与预览同步跟随";
   elements.paneSwap.disabled = mode !== "split";
+  updateSyncControls();
   if (mode === "reading") setFormatTool(null);
+  if (mode === "reading") closeHtmlCompletion();
   if (mode !== "reading") elements.editor.focus();
   if (mode === "split") requestAnimationFrame(() => {
     updateSplitLayout();
@@ -633,38 +704,189 @@ function previewScrollTarget({ includeManualOffset = true } = {}) {
   if (!previewWindow || !scroller) return 0;
   const editorRange = Math.max(0, elements.editor.scrollHeight - elements.editor.clientHeight);
   const previewRange = Math.max(0, scroller.scrollHeight - previewWindow.innerHeight);
+  let baseTarget;
   if (elements.editor.scrollTop <= 1) {
-    return Math.min(previewRange, Math.max(0, includeManualOffset ? state.previewSyncOffset : 0));
+    baseTarget = 0;
+  } else if (elements.editor.scrollTop >= editorRange - 1) {
+    baseTarget = previewRange;
+  } else {
+    const probeOffset = Math.min(180, elements.editor.clientHeight * 0.28);
+    const editorProbe = elements.editor.scrollTop + probeOffset;
+    const previewProbe = mapScrollByAnchors(editorProbe, state.scrollAnchors);
+    const paneOffset = elements.editor.getBoundingClientRect().top - elements.preview.getBoundingClientRect().top;
+    baseTarget = previewProbe - probeOffset - paneOffset;
   }
-  if (elements.editor.scrollTop >= editorRange - 1) return previewRange;
-  const probeOffset = Math.min(180, elements.editor.clientHeight * 0.28);
-  const editorProbe = elements.editor.scrollTop + probeOffset;
-  const previewProbe = mapScrollByAnchors(editorProbe, state.scrollAnchors);
-  const paneOffset = elements.editor.getBoundingClientRect().top - elements.preview.getBoundingClientRect().top;
-  const manualOffset = includeManualOffset ? state.previewSyncOffset : 0;
-  return Math.min(previewRange, Math.max(0, previewProbe - probeOffset - paneOffset + manualOffset));
+  const manualOffset = includeManualOffset && state.scrollSyncMode === "manual" ? state.previewSyncOffset : 0;
+  return Math.min(previewRange, Math.max(0, baseTarget + manualOffset));
+}
+
+function setPreviewScroll(top) {
+  const previewWindow = elements.preview.contentWindow;
+  const scroller = elements.preview.contentDocument?.scrollingElement;
+  if (!previewWindow || !scroller) return;
+  const previewRange = Math.max(0, scroller.scrollHeight - previewWindow.innerHeight);
+  const target = Math.min(previewRange, Math.max(0, top));
+  state.previewProgrammaticTarget = target;
+  elements.resetSync.dataset.programmaticTarget = String(target);
+  previewWindow.scrollTo({ top: target, behavior: "auto" });
 }
 
 function capturePreviewAlignment() {
-  if (state.mode !== "split" || performance.now() < state.previewSyncUntil) return;
+  if (state.mode !== "split" || state.scrollSyncMode !== "manual") return;
   cancelAnimationFrame(state.previewManualFrame);
   state.previewManualFrame = requestAnimationFrame(() => {
-    if (state.mode !== "split" || performance.now() < state.previewSyncUntil) return;
+    if (state.mode !== "split" || state.scrollSyncMode !== "manual") return;
     const actual = elements.preview.contentWindow?.scrollY || 0;
+    const expected = state.previewProgrammaticTarget;
+    if (expected !== null && Math.abs(actual - expected) <= 2) return;
+    state.previewProgrammaticTarget = null;
     state.previewSyncOffset = actual - previewScrollTarget({ includeManualOffset: false });
+    updateSyncControls();
   });
 }
 
 function syncPreviewToEditor() {
-  if (state.mode !== "split" || !state.rendererReady) return;
+  if (state.mode !== "split" || !state.rendererReady || state.scrollSyncMode === "off") return;
   cancelAnimationFrame(state.previewScrollFrame);
   state.previewScrollFrame = requestAnimationFrame(() => {
     if (!state.scrollAnchors.length) rebuildScrollAnchors();
-    const previewWindow = elements.preview.contentWindow;
     const target = previewScrollTarget();
-    state.previewSyncUntil = performance.now() + 140;
-    previewWindow?.scrollTo({ top: target, behavior: "auto" });
+    setPreviewScroll(target);
   });
+}
+
+function closeHtmlCompletion() {
+  elements.htmlCompletion.hidden = true;
+  elements.htmlCompletion.replaceChildren();
+  state.completionContext = null;
+  state.completionItems = [];
+  state.completionIndex = 0;
+}
+
+function editorCaretPosition(offset) {
+  const style = getComputedStyle(elements.editor);
+  const mirror = document.createElement("div");
+  Object.assign(mirror.style, {
+    position: "fixed",
+    visibility: "hidden",
+    pointerEvents: "none",
+    left: "-100000px",
+    top: "0",
+    width: `${elements.editor.clientWidth}px`,
+    height: "auto",
+    overflow: "visible",
+    boxSizing: "border-box",
+    whiteSpace: "pre-wrap",
+    overflowWrap: style.overflowWrap,
+    wordBreak: style.wordBreak,
+    fontFamily: style.fontFamily,
+    fontSize: style.fontSize,
+    fontWeight: style.fontWeight,
+    fontStyle: style.fontStyle,
+    lineHeight: style.lineHeight,
+    letterSpacing: style.letterSpacing,
+    wordSpacing: style.wordSpacing,
+    tabSize: style.tabSize,
+    paddingTop: style.paddingTop,
+    paddingRight: style.paddingRight,
+    paddingBottom: style.paddingBottom,
+    paddingLeft: style.paddingLeft,
+    border: "0",
+  });
+  mirror.append(document.createTextNode(elements.editor.value.slice(0, offset)));
+  const marker = document.createElement("span");
+  marker.textContent = "\u200b";
+  mirror.append(marker, document.createTextNode(elements.editor.value.slice(offset) || "\u200b"));
+  document.body.append(mirror);
+  const result = {
+    left: marker.offsetLeft - elements.editor.scrollLeft,
+    top: marker.offsetTop - elements.editor.scrollTop,
+    lineHeight: Number.parseFloat(style.lineHeight) || 24,
+  };
+  mirror.remove();
+  return result;
+}
+
+function positionHtmlCompletion() {
+  if (elements.htmlCompletion.hidden || !state.completionContext) return;
+  const caret = editorCaretPosition(state.completionContext.end);
+  const paneBounds = elements.editorPane.getBoundingClientRect();
+  const editorBounds = elements.editor.getBoundingClientRect();
+  const preferredLeft = editorBounds.left - paneBounds.left + caret.left;
+  const preferredTop = editorBounds.top - paneBounds.top + caret.top + caret.lineHeight + 5;
+  const left = Math.max(8, Math.min(preferredLeft, elements.editorPane.clientWidth - elements.htmlCompletion.offsetWidth - 8));
+  const belowFits = preferredTop + elements.htmlCompletion.offsetHeight <= elements.editorPane.clientHeight - 8;
+  const top = belowFits
+    ? preferredTop
+    : Math.max(48, editorBounds.top - paneBounds.top + caret.top - elements.htmlCompletion.offsetHeight - 5);
+  elements.htmlCompletion.style.left = `${Math.round(left)}px`;
+  elements.htmlCompletion.style.top = `${Math.round(top)}px`;
+}
+
+function selectHtmlCompletion(index) {
+  if (!state.completionItems.length) return;
+  state.completionIndex = (index + state.completionItems.length) % state.completionItems.length;
+  [...elements.htmlCompletion.querySelectorAll("button")].forEach((button, buttonIndex) => {
+    const selected = buttonIndex === state.completionIndex;
+    button.setAttribute("aria-selected", String(selected));
+    if (selected) button.scrollIntoView({ block: "nearest" });
+  });
+}
+
+function applyHtmlCompletion(index = state.completionIndex) {
+  const completion = state.completionItems[index];
+  const result = applyTextCompletion(elements.editor.value, state.completionContext, completion);
+  if (!result.applied) return;
+  elements.editor.value = result.text;
+  elements.editor.focus();
+  elements.editor.setSelectionRange(result.selectionStart, result.selectionEnd);
+  closeHtmlCompletion();
+  elements.editor.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function updateHtmlCompletion() {
+  if (state.mode === "reading") {
+    closeHtmlCompletion();
+    return;
+  }
+  if (elements.editor.selectionStart !== elements.editor.selectionEnd) {
+    closeHtmlCompletion();
+    return;
+  }
+  const context = findHtmlCompletionContext(elements.editor.value, elements.editor.selectionStart);
+  if (!context) {
+    closeHtmlCompletion();
+    return;
+  }
+  const items = htmlCompletions.filter((completion) => {
+    const terms = [completion.key, ...(completion.aliases || [])];
+    return terms.some((term) => term.startsWith(context.query));
+  });
+  if (!items.length) {
+    closeHtmlCompletion();
+    return;
+  }
+  state.completionContext = context;
+  state.completionItems = items;
+  state.completionIndex = 0;
+  elements.htmlCompletion.replaceChildren(...items.map((completion, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(index === 0));
+    const code = document.createElement("code");
+    code.textContent = completion.text;
+    const label = document.createElement("span");
+    label.textContent = completion.label;
+    button.append(code, label);
+    button.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      applyHtmlCompletion(index);
+    });
+    return button;
+  }));
+  elements.htmlCompletion.hidden = false;
+  positionHtmlCompletion();
 }
 
 const formatToolDetails = {
@@ -939,6 +1161,7 @@ function initializeSyntaxCopyButtons() {
       button.type = "button";
       button.className = "syntax-copy-button";
       button.textContent = `复制${template.label}`;
+      button.dataset.copyText = template.text;
       button.addEventListener("click", async () => {
         try {
           await writeClipboard(template.text);
@@ -990,10 +1213,33 @@ elements.editor.addEventListener("input", () => {
   renderOutline();
   renderPreview();
   if (!elements.findBar.hidden && state.mode !== "reading") refreshFindResults();
+  updateHtmlCompletion();
 });
-elements.editor.addEventListener("scroll", syncPreviewToEditor, { passive: true });
+elements.editor.addEventListener("keydown", (event) => {
+  if (elements.htmlCompletion.hidden) return;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    event.stopPropagation();
+    selectHtmlCompletion(state.completionIndex + (event.key === "ArrowDown" ? 1 : -1));
+  } else if (event.key === "Enter" || event.key === "Tab") {
+    event.preventDefault();
+    event.stopPropagation();
+    applyHtmlCompletion();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeHtmlCompletion();
+  }
+});
+elements.editor.addEventListener("scroll", () => {
+  positionHtmlCompletion();
+  syncPreviewToEditor();
+}, { passive: true });
 elements.editor.addEventListener("keyup", syncPreviewToEditor);
-elements.editor.addEventListener("click", syncPreviewToEditor);
+elements.editor.addEventListener("click", () => {
+  closeHtmlCompletion();
+  syncPreviewToEditor();
+});
 elements.editor.addEventListener("mouseup", () => {
   if (state.formatTool && elements.editor.selectionStart !== elements.editor.selectionEnd) {
     requestAnimationFrame(() => applyEditorFormat(state.formatTool));
@@ -1011,6 +1257,8 @@ elements.expandSidebar.addEventListener("click", toggleSidebar);
 elements.documentsTab.addEventListener("click", () => setSidebarView("documents"));
 elements.outlineTab.addEventListener("click", () => setSidebarView("outline"));
 elements.paneSwap.addEventListener("click", swapPaneSides);
+elements.syncMode.addEventListener("change", () => setScrollSyncMode(elements.syncMode.value));
+elements.resetSync.addEventListener("click", resetPreviewAlignment);
 elements.sidebarResizer.addEventListener("pointerdown", beginResize(
   elements.sidebarResizer,
   "is-resizing-sidebar",
@@ -1069,6 +1317,7 @@ elements.findNext.addEventListener("click", () => stepFind(1));
 elements.findClose.addEventListener("click", closeFindBar);
 document.addEventListener("pointerdown", (event) => {
   if (!elements.copyMenu.hidden && !event.target.closest(".copy-menu-wrap")) setCopyMenu(false);
+  if (!elements.htmlCompletion.hidden && !event.target.closest("#html-completion") && event.target !== elements.editor) closeHtmlCompletion();
 });
 for (const [tool, details] of Object.entries(formatToolDetails)) {
   details.button.addEventListener("mousedown", (event) => event.preventDefault());
@@ -1199,6 +1448,7 @@ new ResizeObserver(() => {
   updateSidebarWidth();
   updateSplitLayout();
   scheduleScrollAnchorRebuild();
+  positionHtmlCompletion();
 }).observe(elements.workspace);
 
 start();

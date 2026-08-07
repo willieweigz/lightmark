@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  applyTextCompletion,
   directoryFromPath,
   extractHeadings,
+  findHtmlCompletionContext,
   findTextMatches,
   fileNameFromPath,
   formatSelection,
@@ -54,6 +56,29 @@ describe("Markdown document helpers", () => {
     assert.equal(mapScrollByAnchors(50, anchors), 110);
     assert.equal(mapScrollByAnchors(200, anchors), 360);
     assert.equal(mapScrollByAnchors(400, anchors), 500);
+  });
+
+  it("recognizes only a safe unfinished angle-bracket completion context", () => {
+    assert.deepEqual(findHtmlCompletionContext("正文\n<br", 6), { start: 3, end: 6, query: "br" });
+    assert.deepEqual(findHtmlCompletionContext("<MA", 3), { start: 0, end: 3, query: "ma" });
+    assert.equal(findHtmlCompletionContext("<br>", 4), null);
+    assert.equal(findHtmlCompletionContext("普通文字", 4), null);
+    assert.equal(findHtmlCompletionContext("<<", 2), null);
+  });
+
+  it("inserts a completion and selects only its editable placeholder", () => {
+    const context = findHtmlCompletionContext("前文\n<ma", 6);
+    const completion = {
+      text: "<mark>高光文字</mark>",
+      selectionStart: 6,
+      selectionEnd: 10,
+    };
+    assert.deepEqual(applyTextCompletion("前文\n<ma后文", context, completion), {
+      text: "前文\n<mark>高光文字</mark>后文",
+      selectionStart: 9,
+      selectionEnd: 13,
+      applied: true,
+    });
   });
 
   it("distinguishes external links and relative images", () => {
