@@ -171,6 +171,38 @@ const inlineFormats = Object.freeze({
   redText: { opening: '<span class="text-red">', closing: "</span>" },
 });
 
+function escapeEditorHtml(value) {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[character]);
+}
+
+export function renderEditorDecorations(source) {
+  const pattern = /<mark>([\s\S]*?)<\/mark>|<span class="text-red">([\s\S]*?)<\/span>/gi;
+  let cursor = 0;
+  let html = "";
+
+  for (const match of source.matchAll(pattern)) {
+    html += escapeEditorHtml(source.slice(cursor, match.index));
+    if (match[1] !== undefined) {
+      html += '<span class="editor-token">&lt;mark&gt;</span>';
+      html += `<mark class="editor-source-highlight">${escapeEditorHtml(match[1])}</mark>`;
+      html += '<span class="editor-token">&lt;/mark&gt;</span>';
+    } else {
+      html += '<span class="editor-token">&lt;span class=&quot;text-red&quot;&gt;</span>';
+      html += `<span class="editor-source-red">${escapeEditorHtml(match[2])}</span>`;
+      html += '<span class="editor-token">&lt;/span&gt;</span>';
+    }
+    cursor = match.index + match[0].length;
+  }
+
+  return html + escapeEditorHtml(source.slice(cursor));
+}
+
 export function formatSelection(source, selectionStart, selectionEnd, format) {
   const wrapper = inlineFormats[format];
   const validRange = Number.isInteger(selectionStart)

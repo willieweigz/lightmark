@@ -96,15 +96,23 @@
 
           <div id="content-panes" class="content-panes reading-mode">
             <div id="editor-pane" class="pane editor-pane" aria-label="Markdown 编辑器">
-              <div class="formatting-toolbar" role="toolbar" aria-label="文字标记工具">
+              <div class="formatting-toolbar" role="toolbar" aria-label="文字标记与语法快捷插入">
                 <span class="formatting-label">标记</span>
                 <button id="highlight-tool" class="format-button highlight-button" type="button" aria-pressed="false" title="黄色高光：选中文字后点击，或开启后拖选文字">
                   <span class="format-swatch highlight-swatch" aria-hidden="true">A</span>
-                  <span>黄色高光</span>
+                  <span class="tool-label">黄色高光</span>
                 </button>
                 <button id="red-text-tool" class="format-button red-text-button" type="button" aria-pressed="false" title="红色文字：选中文字后点击，或开启后拖选文字">
                   <span class="format-swatch red-swatch" aria-hidden="true">A</span>
-                  <span>红色笔</span>
+                  <span class="tool-label">红色笔</span>
+                </button>
+                <span class="toolbar-divider" aria-hidden="true"></span>
+                <span class="insert-label">插入</span>
+                <button id="indent-insert" class="quick-insert-button" type="button" aria-keyshortcuts="Alt+1" title="在光标处插入 &amp;emsp;&amp;emsp;（Alt+1）">
+                  <code>&amp;emsp;&amp;emsp;</code><kbd>Alt+1</kbd>
+                </button>
+                <button id="blank-break-insert" class="quick-insert-button" type="button" aria-keyshortcuts="Alt+2" title="在光标处插入 &lt;br&gt;&lt;br&gt;（Alt+2）">
+                  <code>&lt;br&gt;&lt;br&gt;</code><kbd>Alt+2</kbd>
                 </button>
                 <span id="formatting-hint" class="formatting-hint" aria-live="polite">先选中文字再点按钮，或先开启画笔再拖选</span>
                 <div class="sync-controls" aria-label="编辑与预览滚动同步">
@@ -118,7 +126,10 @@
                 </div>
                 <button id="pane-swap" class="pane-swap" type="button" aria-pressed="false" title="把编辑区移到右侧">⇄ 换边</button>
               </div>
-              <textarea id="editor" spellcheck="false" aria-label="Markdown 编辑器" placeholder="在这里输入 Markdown…"></textarea>
+              <div id="editor-surface" class="editor-surface">
+                <pre id="editor-overlay" class="editor-overlay" aria-hidden="true"></pre>
+                <textarea id="editor" spellcheck="false" aria-label="Markdown 编辑器" aria-keyshortcuts="Control+S Control+Z Control+Y Control+C Alt+1 Alt+2" placeholder="在这里输入 Markdown…"></textarea>
+              </div>
               <div id="html-completion" class="html-completion" role="listbox" aria-label="安全格式候选" hidden></div>
             </div>
             <div id="split-resizer" class="pane-resizer split-resizer" role="separator" tabindex="0" aria-label="调整编辑区与预览区宽度" aria-orientation="vertical" aria-valuemin="25" aria-valuemax="75" aria-valuenow="44"></div>

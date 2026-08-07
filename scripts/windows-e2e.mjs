@@ -151,6 +151,39 @@ await editor.evaluate((element) => {
 await page.waitForFunction(() => document.querySelector("#editor").value.includes('<span class="text-red">红色文字测试</span>'));
 await page.locator("#red-text-tool").click();
 assert(await page.locator("#red-text-tool").getAttribute("aria-pressed") === "false", "红色笔没有正常退出");
+await page.locator("#editor-overlay .editor-source-highlight", { hasText: "黄色高光测试" }).waitFor();
+await page.locator("#editor-overlay .editor-source-red", { hasText: "红色文字测试" }).waitFor();
+const editorDecorationStyles = await page.locator("#editor-overlay").evaluate((element) => ({
+  raw: element.textContent,
+  highlightBackground: getComputedStyle(element.querySelector(".editor-source-highlight")).backgroundColor,
+  highlightColor: getComputedStyle(element.querySelector(".editor-source-highlight")).color,
+  redColor: getComputedStyle(element.querySelector(".editor-source-red")).color,
+}));
+assert(editorDecorationStyles.raw.includes("<mark>黄色高光测试</mark>"), "编辑区没有保留可见的 mark 原始代码");
+assert(editorDecorationStyles.highlightBackground !== "rgba(0, 0, 0, 0)", "编辑区黄色高光没有背景色");
+assert(editorDecorationStyles.redColor !== editorDecorationStyles.highlightColor, "编辑区红色文字没有显示为红色");
+
+const beforeUndo = await editor.inputValue();
+await editor.press("Control+z");
+await page.waitForFunction(() => !document.querySelector("#editor").value.includes('<span class="text-red">红色文字测试</span>'));
+await editor.press("Control+y");
+await page.waitForFunction(() => document.querySelector("#editor").value.includes('<span class="text-red">红色文字测试</span>'));
+assert(await editor.inputValue() === beforeUndo, "Ctrl+Z / Ctrl+Y 没有正确撤销和恢复工具栏标记");
+
+await editor.press("Control+End");
+const beforeQuickInsert = await editor.inputValue();
+await page.locator("#indent-insert").click();
+assert((await editor.inputValue()).endsWith("&emsp;&emsp;"), "快捷按钮没有插入 &emsp;&emsp;");
+await editor.press("Control+z");
+assert(await editor.inputValue() === beforeQuickInsert, "Ctrl+Z 没有撤销快捷按钮插入");
+await editor.press("Alt+Digit1");
+assert((await editor.inputValue()).endsWith("&emsp;&emsp;"), "Alt+1 没有插入 &emsp;&emsp;");
+await editor.press("Control+z");
+await editor.press("Alt+Digit2");
+assert((await editor.inputValue()).endsWith("<br><br>"), "Alt+2 没有插入 <br><br>");
+await editor.press("Control+z");
+assert(await editor.inputValue() === beforeQuickInsert, "Alt+1 / Alt+2 插入后无法完整撤销");
+record("编辑区原位高光/红字、原始代码可见、快捷按钮、Alt+1/Alt+2 与 Ctrl+Z/Ctrl+Y");
   await page.getByRole("button", { name: "分栏" }).click();
   await preview.locator("mark", { hasText: "黄色高光测试" }).waitFor();
   await preview.locator(".text-red", { hasText: "红色文字测试" }).waitFor();
@@ -257,6 +290,8 @@ assert(redColor !== highlightStyle.color, "红色文字没有显示为红色");
   const previewRangeForAlignment = await preview.locator("body").evaluate(() => Math.max(0, document.scrollingElement.scrollHeight - innerHeight));
   assert(previewRangeForAlignment > automaticPreviewY + 100, "测试文档预览空间不足，无法验证手动对齐偏移");
   await page.locator("#sync-mode").selectOption("manual");
+  assert(await page.locator("#reset-sync").isDisabled(), "尚未手动移动预览时，重新对齐按钮不应启用");
+  assert((await page.locator("#reset-sync").getAttribute("title")).includes("当前已经对齐"), "重新对齐按钮没有说明当前禁用原因");
   await preview.locator("body").evaluate((_, target) => window.scrollTo(0, target), automaticPreviewY + 80);
   await page.waitForTimeout(240);
   const manuallyAlignedY = await preview.locator("body").evaluate(() => window.scrollY);
@@ -270,6 +305,7 @@ assert(redColor !== highlightStyle.color, "红色文字没有显示为红色");
   const previewAfterEditorMove = await preview.locator("body").evaluate(() => window.scrollY);
   await page.locator("#reset-sync").click();
   await page.waitForTimeout(240);
+  assert(await page.locator("#reset-sync").isDisabled(), "重新对齐完成后按钮没有恢复禁用状态");
   const previewAfterReset = await preview.locator("body").evaluate(() => window.scrollY);
   assert(Math.abs((previewAfterEditorMove - previewAfterReset) - storedAlignment) < 4, `手动校准没有持续保留：保存 ${storedAlignment}，实际 ${previewAfterEditorMove - previewAfterReset}`);
 

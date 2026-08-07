@@ -16,6 +16,7 @@ import {
   isMarkdownName,
   isRelativeImageSource,
   mapScrollByAnchors,
+  renderEditorDecorations,
   sortDocuments,
 } from "./core.js";
 
@@ -66,6 +67,9 @@ const elements = {
   highlightTool: document.querySelector("#highlight-tool"),
   redTextTool: document.querySelector("#red-text-tool"),
   formattingHint: document.querySelector("#formatting-hint"),
+  indentInsert: document.querySelector("#indent-insert"),
+  blankBreakInsert: document.querySelector("#blank-break-insert"),
+  editorOverlay: document.querySelector("#editor-overlay"),
   editor: document.querySelector("#editor"),
   htmlCompletion: document.querySelector("#html-completion"),
   preview: document.querySelector("#preview"),
@@ -369,6 +373,7 @@ async function loadDocument(path, { refreshSiblings = false } = {}) {
   state.previewProgrammaticTarget = null;
   state.lastSavedText = payload.contents;
   elements.editor.value = payload.contents;
+  renderEditorOverlay();
   renderOutline();
   setFormatTool(null);
   elements.title.textContent = payload.name;
@@ -486,11 +491,20 @@ function updateModeStatus() {
 
 function updateSyncControls() {
   const inSplit = state.mode === "split";
+  const manual = state.scrollSyncMode === "manual";
+  const calibrated = Math.abs(state.previewSyncOffset) > 1;
   elements.syncMode.value = state.scrollSyncMode;
   elements.syncMode.disabled = !inSplit;
-  elements.resetSync.disabled = !inSplit || state.scrollSyncMode !== "manual" || Math.abs(state.previewSyncOffset) <= 1;
+  elements.resetSync.disabled = !inSplit || !manual || !calibrated;
   elements.resetSync.classList.toggle("calibrated", !elements.resetSync.disabled);
   elements.resetSync.dataset.offset = String(state.previewSyncOffset);
+  elements.resetSync.title = !inSplit
+    ? "只在分栏模式使用"
+    : !manual
+      ? "先把同步方式改为“手动校准”"
+      : !calibrated
+        ? "当前已经对齐；请先手动滚动右侧预览"
+        : "清除手动位置差，并按编辑位置重新对齐";
   updateModeStatus();
 }
 
@@ -529,6 +543,7 @@ function setMode(mode) {
   });
   elements.paneSwap.disabled = mode !== "split";
   updateSyncControls();
+  updateCopyAvailability();
   if (mode === "reading") setFormatTool(null);
   if (mode === "reading") closeHtmlCompletion();
   if (mode !== "reading") elements.editor.focus();
@@ -833,15 +848,57 @@ function selectHtmlCompletion(index) {
   });
 }
 
+function syncEditorOverlayScroll() {
+  elements.editorOverlay.scrollTop = elements.editor.scrollTop;
+  elements.editorOverlay.scrollLeft = elements.editor.scrollLeft;
+}
+
+function renderEditorOverlay() {
+  elements.editorOverlay.innerHTML = `${renderEditorDecorations(elements.editor.value)}\n`;
+  syncEditorOverlayScroll();
+}
+
+function replaceEditorValue(nextText, selectionStart, selectionEnd) {
+  const previousText = elements.editor.value;
+  let prefixLength = 0;
+  while (
+    prefixLength < previousText.length
+    && prefixLength < nextText.length
+    && previousText[prefixLength] === nextText[prefixLength]
+  ) prefixLength += 1;
+
+  let suffixLength = 0;
+  while (
+    suffixLength < previousText.length - prefixLength
+    && suffixLength < nextText.length - prefixLength
+    && previousText[previousText.length - 1 - suffixLength] === nextText[nextText.length - 1 - suffixLength]
+  ) suffixLength += 1;
+
+  const replacement = nextText.slice(prefixLength, nextText.length - suffixLength);
+  elements.editor.focus();
+  elements.editor.setSelectionRange(prefixLength, previousText.length - suffixLength);
+
+  let insertedWithNativeUndo = false;
+  try {
+    insertedWithNativeUndo = document.execCommand("insertText", false, replacement);
+  } catch {
+    insertedWithNativeUndo = false;
+  }
+
+  if (!insertedWithNativeUndo || elements.editor.value !== nextText) {
+    elements.editor.value = nextText;
+    elements.editor.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  elements.editor.setSelectionRange(selectionStart, selectionEnd);
+  renderEditorOverlay();
+}
+
 function applyHtmlCompletion(index = state.completionIndex) {
   const completion = state.completionItems[index];
   const result = applyTextCompletion(elements.editor.value, state.completionContext, completion);
   if (!result.applied) return;
-  elements.editor.value = result.text;
-  elements.editor.focus();
-  elements.editor.setSelectionRange(result.selectionStart, result.selectionEnd);
+  replaceEditorValue(result.text, result.selectionStart, result.selectionEnd);
   closeHtmlCompletion();
-  elements.editor.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function updateHtmlCompletion() {
@@ -894,6 +951,11 @@ const formatToolDetails = {
   redText: { button: elements.redTextTool, label: "红色笔" },
 };
 
+const quickInsertDetails = {
+  indent: { button: elements.indentInsert, text: "&emsp;&emsp;", shortcut: "Alt+1" },
+  blankBreak: { button: elements.blankBreakInsert, text: "<br><br>", shortcut: "Alt+2" },
+};
+
 function setFormatTool(tool) {
   state.formatTool = tool;
   Object.entries(formatToolDetails).forEach(([name, details]) => {
@@ -919,13 +981,24 @@ function applyEditorFormat(tool) {
     return false;
   }
 
-  elements.editor.value = result.text;
-  elements.editor.focus();
-  elements.editor.setSelectionRange(result.selectionStart, result.selectionEnd);
-  elements.editor.dispatchEvent(new Event("input", { bubbles: true }));
+  replaceEditorValue(result.text, result.selectionStart, result.selectionEnd);
   if (!state.formatTool) {
-    elements.formattingHint.textContent = result.removed ? "已移除文字标记" : "已添加文字标记";
+    const label = tool === "highlight" ? "黄色高光" : "红色文字";
+    elements.formattingHint.textContent = result.removed
+      ? `已移除${label} · Ctrl+Z 可撤销`
+      : `已添加${label} · Ctrl+Z 可撤销`;
   }
+  return true;
+}
+
+function insertQuickSyntax(detail) {
+  if (!state.currentPath || state.mode === "reading") return false;
+  const cursor = elements.editor.selectionStart;
+  const nextText = `${elements.editor.value.slice(0, cursor)}${detail.text}${elements.editor.value.slice(cursor)}`;
+  const nextCursor = cursor + detail.text.length;
+  replaceEditorValue(nextText, nextCursor, nextCursor);
+  elements.formattingHint.textContent = `已插入 ${detail.text} · Ctrl+Z 可撤销`;
+  closeHtmlCompletion();
   return true;
 }
 
@@ -965,7 +1038,11 @@ function cycleTheme() {
 }
 
 function updateCopyAvailability() {
-  elements.copyMenuToggle.disabled = !state.currentPath;
+  const noDocument = !state.currentPath;
+  elements.copyMenuToggle.disabled = noDocument;
+  Object.values(quickInsertDetails).forEach(({ button }) => {
+    button.disabled = noDocument || state.mode === "reading";
+  });
 }
 
 function setCopyMenu(openMenu) {
@@ -1209,6 +1286,7 @@ async function showError(title, error) {
 }
 
 elements.editor.addEventListener("input", () => {
+  renderEditorOverlay();
   setDirty(elements.editor.value !== state.lastSavedText);
   renderOutline();
   renderPreview();
@@ -1232,6 +1310,7 @@ elements.editor.addEventListener("keydown", (event) => {
   }
 });
 elements.editor.addEventListener("scroll", () => {
+  syncEditorOverlayScroll();
   positionHtmlCompletion();
   syncPreviewToEditor();
 }, { passive: true });
@@ -1323,6 +1402,10 @@ for (const [tool, details] of Object.entries(formatToolDetails)) {
   details.button.addEventListener("mousedown", (event) => event.preventDefault());
   details.button.addEventListener("click", () => handleFormatToolClick(tool));
 }
+Object.values(quickInsertDetails).forEach((detail) => {
+  detail.button.addEventListener("mousedown", (event) => event.preventDefault());
+  detail.button.addEventListener("click", () => insertQuickSyntax(detail));
+});
 elements.cancelPending.addEventListener("click", () => {
   state.pendingAction = null;
   elements.unsavedDialog.close();
@@ -1362,6 +1445,14 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   const control = event.ctrlKey || event.metaKey;
+  const quickInsert = event.altKey && !control && !event.shiftKey && document.activeElement === elements.editor
+    ? (event.code === "Digit1" ? quickInsertDetails.indent : event.code === "Digit2" ? quickInsertDetails.blankBreak : null)
+    : null;
+  if (quickInsert) {
+    event.preventDefault();
+    insertQuickSyntax(quickInsert);
+    return;
+  }
   if (event.key === "F11") {
     event.preventDefault();
     toggleFullscreen().catch((error) => showError("无法切换全屏幕", error));
@@ -1425,6 +1516,7 @@ getCurrentWindow().onCloseRequested((event) => {
 async function start() {
   applyTheme(state.theme);
   initializeSyntaxCopyButtons();
+  renderEditorOverlay();
   updateCopyAvailability();
   try {
     updateFullscreenButton(await getCurrentWindow().isFullscreen());
