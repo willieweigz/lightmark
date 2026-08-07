@@ -131,6 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func zoomReset(_ sender: Any?) { currentDocument?.zoomReset(sender) }
     @objc private func toggleSidebar(_ sender: Any?) { currentDocument?.toggleSidebar(sender) }
     @objc private func showMarkdownSyntax(_ sender: Any?) { currentDocument?.showSyntaxGuide(sender) }
+    @objc private func copyMarkdownDocument(_ sender: Any?) { currentDocument?.copyMarkdownSource(sender) }
 
     private func showDocument(url: URL?) {
         if let url,
@@ -185,6 +186,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         editMenu.addItem(withTitle: "复制", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        let copyMarkdown = editMenu.addItem(withTitle: "复制整篇 Markdown", action: #selector(copyMarkdownDocument(_:)), keyEquivalent: "C")
+        copyMarkdown.target = self
+        copyMarkdown.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = editMenu
@@ -209,6 +213,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         smaller.target = self
         let actual = viewMenu.addItem(withTitle: "实际大小", action: #selector(zoomReset(_:)), keyEquivalent: "0")
         actual.target = self
+        viewMenu.addItem(.separator())
+        let fullScreen = viewMenu.addItem(withTitle: "进入全屏幕", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        fullScreen.keyEquivalentModifierMask = [.control, .command]
         viewItem.submenu = viewMenu
 
         let windowItem = NSMenuItem()
@@ -240,6 +247,14 @@ private final class DocumentWindow: NSWindow {
         let key = event.charactersIgnoringModifiers?.lowercased()
         if modifiers == [.command], key == "f" || key == "/" {
             documentController?.showSyntaxGuide(nil)
+            return true
+        }
+        if modifiers == [.command, .shift], key == "c" {
+            documentController?.copyMarkdownSource(nil)
+            return true
+        }
+        if modifiers == [.control, .command], key == "f" {
+            toggleFullScreen(nil)
             return true
         }
         return super.performKeyEquivalent(with: event)
@@ -460,6 +475,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private var isUpdatingSidebarSelection = false
     private var syntaxPopover: NSPopover?
     private var syntaxGuideController: SyntaxGuideViewController?
+    private var copyFeedbackWorkItem: DispatchWorkItem?
     private var activeFormatTool: InlineFormatTool?
     private var isApplyingSplitLayout = false
     private var editorOnRight = UserDefaults.standard.bool(forKey: "LightMarkEditorOnRight")
@@ -475,6 +491,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let sidebarToggleButton = NSButton(title: "☰", target: nil, action: nil)
     private let modeControl = NSSegmentedControl(labels: ["阅读", "编辑", "分栏"], trackingMode: .selectOne, target: nil, action: nil)
     private let syntaxButton = NSButton(title: "语法", target: nil, action: nil)
+    private let copyButton = NSButton(title: "", target: nil, action: nil)
     private let titleLabel = NSTextField(labelWithString: "未命名")
     private let statusLabel = NSTextField(labelWithString: "")
     private let previousButton = NSButton(title: "‹", target: nil, action: nil)
@@ -569,6 +586,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         syntaxButton.toolTip = "Markdown 语法速查（⌘F 或 ⌘/）"
         syntaxButton.translatesAutoresizingMaskIntoConstraints = false
         topBar.addSubview(syntaxButton)
+
+        copyButton.bezelStyle = .inline
+        copyButton.isBordered = false
+        copyButton.target = self
+        copyButton.action = #selector(copyMarkdownSource(_:))
+        copyButton.toolTip = "复制整篇 Markdown（⇧⌘C）"
+        copyButton.setAccessibilityLabel("复制整篇 Markdown")
+        copyButton.translatesAutoresizingMaskIntoConstraints = false
+        updateCopyButton(copied: false)
+        topBar.addSubview(copyButton)
 
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingMiddle
@@ -747,6 +774,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         splitView.addArrangedSubview(webView)
         applyPaneOrder()
 
+        let titleAfterCopy = titleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: copyButton.trailingAnchor, constant: 8)
+        titleAfterCopy.priority = .defaultHigh
+
         NSLayoutConstraint.activate([
             topBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             topBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -763,10 +793,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             syntaxButton.centerYAnchor.constraint(equalTo: modeControl.centerYAnchor),
             syntaxButton.widthAnchor.constraint(equalToConstant: 42),
             syntaxButton.heightAnchor.constraint(equalToConstant: 26),
+            copyButton.leadingAnchor.constraint(equalTo: syntaxButton.trailingAnchor, constant: 4),
+            copyButton.centerYAnchor.constraint(equalTo: syntaxButton.centerYAnchor),
+            copyButton.widthAnchor.constraint(equalToConstant: 30),
+            copyButton.heightAnchor.constraint(equalToConstant: 26),
             titleLabel.centerXAnchor.constraint(equalTo: topBar.centerXAnchor),
             titleLabel.centerYAnchor.constraint(equalTo: modeControl.centerYAnchor),
             titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
-            titleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: syntaxButton.trailingAnchor, constant: 8),
+            titleAfterCopy,
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: previousButton.leadingAnchor, constant: -12),
             statusLabel.trailingAnchor.constraint(equalTo: topBar.trailingAnchor, constant: -16),
             statusLabel.centerYAnchor.constraint(equalTo: modeControl.centerYAnchor),
@@ -1490,6 +1524,36 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         syntaxPopover = popover
         syntaxGuideController = controller
         DispatchQueue.main.async { controller.focusSearch() }
+    }
+
+    @objc func copyMarkdownSource(_ sender: Any?) {
+        let previousStatus = statusLabel.stringValue
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.setString(editor.string, forType: .string) else {
+            statusLabel.stringValue = "复制失败"
+            return
+        }
+
+        copyFeedbackWorkItem?.cancel()
+        updateCopyButton(copied: true)
+        statusLabel.stringValue = "全文已复制"
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.updateCopyButton(copied: false)
+            if self.statusLabel.stringValue == "全文已复制" {
+                self.statusLabel.stringValue = previousStatus
+            }
+        }
+        copyFeedbackWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: item)
+    }
+
+    private func updateCopyButton(copied: Bool) {
+        let symbol = copied ? "checkmark.circle.fill" : "doc.on.doc"
+        copyButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "复制整篇 Markdown")
+        copyButton.contentTintColor = copied ? .systemGreen : .secondaryLabelColor
     }
 
     @objc func save(_ sender: Any?) {
