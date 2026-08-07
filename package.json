@@ -1,13 +1,13 @@
 {
   "name": "lightmark",
   "private": true,
-  "version": "0.5.2",
+  "version": "0.5.3",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test src/core.test.js",
+    "test": "node --test src/*.test.js",
     "test:windows": "node scripts/windows-e2e.mjs",
     "tauri": "tauri"
   },

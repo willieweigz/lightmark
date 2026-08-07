@@ -12,6 +12,7 @@ import {
   isMarkdownName,
   isRelativeImageSource,
   mapScrollByAnchors,
+  renderEditorDecorations,
   sortDocuments,
 } from "./core.js";
 
@@ -115,6 +116,17 @@ describe("Markdown document helpers", () => {
     const applied = formatSelection("这句需要强调", 2, 6, "redText");
     assert.equal(applied.text, '这句<span class="text-red">需要强调</span>');
     assert.deepEqual([applied.selectionStart, applied.selectionEnd], [25, 29]);
+  });
+
+  it("renders safe editor-only yellow and red decorations without trusting document HTML", () => {
+    const source = '<script>alert(1)</script> <mark>黄色 & 重点</mark> <span class="text-red">红字</span>';
+    const html = renderEditorDecorations(source);
+    assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    assert.doesNotMatch(html, /<script>/);
+    assert.match(html, /<mark class="editor-source-highlight">黄色 &amp; 重点<\/mark>/);
+    assert.match(html, /<span class="editor-source-red">红字<\/span>/);
+    assert.match(html, /&lt;mark&gt;/);
+    assert.match(html, /&lt;span class=&quot;text-red&quot;&gt;/);
   });
 
   it("does not wrap selections across Markdown blocks", () => {

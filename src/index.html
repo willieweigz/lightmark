@@ -33,6 +33,9 @@
               </button>
             </div>
           </div>
+          <button id="ai-toggle" class="button ai-toggle" type="button" aria-controls="ai-sidebar" aria-expanded="false" title="打开 Codex AI 助读侧栏">
+            <span class="ai-spark" aria-hidden="true">✦</span> AI
+          </button>
         </div>
 
         <div class="document-navigation" aria-label="文档导航">
@@ -96,15 +99,23 @@
 
           <div id="content-panes" class="content-panes reading-mode">
             <div id="editor-pane" class="pane editor-pane" aria-label="Markdown 编辑器">
-              <div class="formatting-toolbar" role="toolbar" aria-label="文字标记工具">
+              <div class="formatting-toolbar" role="toolbar" aria-label="文字标记与语法快捷插入">
                 <span class="formatting-label">标记</span>
                 <button id="highlight-tool" class="format-button highlight-button" type="button" aria-pressed="false" title="黄色高光：选中文字后点击，或开启后拖选文字">
                   <span class="format-swatch highlight-swatch" aria-hidden="true">A</span>
-                  <span>黄色高光</span>
+                  <span class="tool-label">黄色高光</span>
                 </button>
                 <button id="red-text-tool" class="format-button red-text-button" type="button" aria-pressed="false" title="红色文字：选中文字后点击，或开启后拖选文字">
                   <span class="format-swatch red-swatch" aria-hidden="true">A</span>
-                  <span>红色笔</span>
+                  <span class="tool-label">红色笔</span>
+                </button>
+                <span class="toolbar-divider" aria-hidden="true"></span>
+                <span class="insert-label">插入</span>
+                <button id="indent-insert" class="quick-insert-button" type="button" aria-keyshortcuts="Alt+1" title="在光标处插入 &amp;emsp;&amp;emsp;（Alt+1）">
+                  <code>&amp;emsp;&amp;emsp;</code><kbd>Alt+1</kbd>
+                </button>
+                <button id="blank-break-insert" class="quick-insert-button" type="button" aria-keyshortcuts="Alt+2" title="在光标处插入 &lt;br&gt;&lt;br&gt;（Alt+2）">
+                  <code>&lt;br&gt;&lt;br&gt;</code><kbd>Alt+2</kbd>
                 </button>
                 <span id="formatting-hint" class="formatting-hint" aria-live="polite">先选中文字再点按钮，或先开启画笔再拖选</span>
                 <div class="sync-controls" aria-label="编辑与预览滚动同步">
@@ -118,7 +129,10 @@
                 </div>
                 <button id="pane-swap" class="pane-swap" type="button" aria-pressed="false" title="把编辑区移到右侧">⇄ 换边</button>
               </div>
-              <textarea id="editor" spellcheck="false" aria-label="Markdown 编辑器" placeholder="在这里输入 Markdown…"></textarea>
+              <div id="editor-surface" class="editor-surface">
+                <pre id="editor-overlay" class="editor-overlay" aria-hidden="true"></pre>
+                <textarea id="editor" spellcheck="false" aria-label="Markdown 编辑器" aria-keyshortcuts="Control+S Control+Z Control+Y Control+C Alt+1 Alt+2" placeholder="在这里输入 Markdown…"></textarea>
+              </div>
               <div id="html-completion" class="html-completion" role="listbox" aria-label="安全格式候选" hidden></div>
             </div>
             <div id="split-resizer" class="pane-resizer split-resizer" role="separator" tabindex="0" aria-label="调整编辑区与预览区宽度" aria-orientation="vertical" aria-valuemin="25" aria-valuemax="75" aria-valuenow="44"></div>
@@ -133,6 +147,69 @@
             <span id="mode-status">阅读模式 · ← → 翻页</span>
           </footer>
         </section>
+
+        <div id="ai-resizer" class="pane-resizer ai-resizer" role="separator" tabindex="0" aria-label="调整 AI 助读宽度" aria-orientation="vertical" aria-valuemin="300" aria-valuemax="560" aria-valuenow="360" hidden></div>
+
+        <aside id="ai-sidebar" class="ai-sidebar" aria-label="Codex AI 助读" hidden>
+          <header class="ai-header">
+            <div>
+              <p class="eyebrow">只读助读</p>
+              <h2><span class="ai-mark" aria-hidden="true">✦</span> Codex</h2>
+            </div>
+            <div class="ai-header-actions">
+              <button id="ai-new-chat" class="ai-icon-button" type="button" title="开始新对话" aria-label="开始新对话">＋</button>
+              <button id="ai-close" class="ai-icon-button" type="button" title="收起 AI 助读" aria-label="收起 AI 助读">×</button>
+            </div>
+          </header>
+
+          <div class="ai-connection" aria-live="polite">
+            <span id="ai-connection-dot" class="ai-connection-dot"></span>
+            <span id="ai-connection-label">尚未连接</span>
+            <span id="ai-model-label" class="ai-model-label"></span>
+          </div>
+
+          <div class="ai-context-bar">
+            <label for="ai-context-mode">发送给 Codex</label>
+            <select id="ai-context-mode">
+              <option value="document">整篇文章</option>
+              <option value="selection">选中文字</option>
+            </select>
+            <span id="ai-context-summary">请先打开文章</span>
+          </div>
+
+          <div class="ai-answer-bar">
+            <label for="ai-answer-mode">回答方式</label>
+            <select id="ai-answer-mode" title="选择 Codex 可以使用的知识范围">
+              <option value="source">只依据原文</option>
+              <option value="natural">自然回答</option>
+              <option value="web">联网查证</option>
+            </select>
+            <span id="ai-answer-summary">资料之外不补充</span>
+          </div>
+
+          <div id="ai-messages" class="ai-messages" aria-live="polite">
+            <div id="ai-empty" class="ai-empty">
+              <div class="ai-empty-mark" aria-hidden="true"><span>文</span><i>✦</i></div>
+              <h3>边读，边问</h3>
+              <p>打开文章后，可以请 Codex 解释、总结或回答问题。</p>
+              <div class="ai-suggestions" aria-label="问题示例">
+                <button type="button" data-ai-prompt="用三句话总结这篇文章。">总结全文</button>
+                <button type="button" data-ai-prompt="这篇文章最重要的观点是什么？">提炼观点</button>
+                <button type="button" data-ai-prompt="请用更容易理解的语言解释这篇文章。">通俗解释</button>
+              </div>
+            </div>
+          </div>
+
+          <form id="ai-form" class="ai-composer">
+            <label class="sr-only" for="ai-question">向 Codex 提问</label>
+            <textarea id="ai-question" rows="3" maxlength="4000" placeholder="问问这篇文章…" disabled></textarea>
+            <div class="ai-composer-footer">
+              <span id="ai-privacy-note">仅在发送时上传所选资料</span>
+              <button id="ai-stop" class="ai-stop" type="button" hidden>停止</button>
+              <button id="ai-send" class="ai-send" type="submit" disabled aria-label="发送问题">↑</button>
+            </div>
+          </form>
+        </aside>
       </main>
     </div>
 

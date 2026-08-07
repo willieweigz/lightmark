@@ -4,6 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { message, open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { accountLabel, answerModeDetails, chooseAiContext, contextPreview, normalizeAnswerMode } from "./ai.js";
 import {
   applyTextCompletion,
   directoryFromPath,
@@ -16,6 +17,7 @@ import {
   isMarkdownName,
   isRelativeImageSource,
   mapScrollByAnchors,
+  renderEditorDecorations,
   sortDocuments,
 } from "./core.js";
 
@@ -34,6 +36,7 @@ const elements = {
   copyMenuToggle: document.querySelector("#copy-menu-toggle"),
   copyMenu: document.querySelector("#copy-menu"),
   copyMenuItems: [...document.querySelectorAll("#copy-menu [data-copy-mode]")],
+  aiToggle: document.querySelector("#ai-toggle"),
   workspace: document.querySelector(".workspace"),
   sidebar: document.querySelector("#sidebar"),
   documentsTab: document.querySelector("#documents-tab"),
@@ -66,6 +69,9 @@ const elements = {
   highlightTool: document.querySelector("#highlight-tool"),
   redTextTool: document.querySelector("#red-text-tool"),
   formattingHint: document.querySelector("#formatting-hint"),
+  indentInsert: document.querySelector("#indent-insert"),
+  blankBreakInsert: document.querySelector("#blank-break-insert"),
+  editorOverlay: document.querySelector("#editor-overlay"),
   editor: document.querySelector("#editor"),
   htmlCompletion: document.querySelector("#html-completion"),
   preview: document.querySelector("#preview"),
@@ -78,6 +84,25 @@ const elements = {
   cancelPending: document.querySelector("#cancel-pending"),
   discardPending: document.querySelector("#discard-pending"),
   savePending: document.querySelector("#save-pending"),
+  aiSidebar: document.querySelector("#ai-sidebar"),
+  aiResizer: document.querySelector("#ai-resizer"),
+  aiClose: document.querySelector("#ai-close"),
+  aiNewChat: document.querySelector("#ai-new-chat"),
+  aiConnectionDot: document.querySelector("#ai-connection-dot"),
+  aiConnectionLabel: document.querySelector("#ai-connection-label"),
+  aiModelLabel: document.querySelector("#ai-model-label"),
+  aiContextMode: document.querySelector("#ai-context-mode"),
+  aiContextSummary: document.querySelector("#ai-context-summary"),
+  aiAnswerMode: document.querySelector("#ai-answer-mode"),
+  aiAnswerSummary: document.querySelector("#ai-answer-summary"),
+  aiMessages: document.querySelector("#ai-messages"),
+  aiEmpty: document.querySelector("#ai-empty"),
+  aiSuggestions: [...document.querySelectorAll("[data-ai-prompt]")],
+  aiForm: document.querySelector("#ai-form"),
+  aiQuestion: document.querySelector("#ai-question"),
+  aiPrivacyNote: document.querySelector("#ai-privacy-note"),
+  aiStop: document.querySelector("#ai-stop"),
+  aiSend: document.querySelector("#ai-send"),
 };
 
 const state = {
@@ -112,11 +137,19 @@ const state = {
   copyFeedbackTimer: 0,
   findMatches: [],
   findIndex: -1,
+  aiOpen: false,
+  aiReady: false,
+  aiSignedIn: false,
+  aiBusy: false,
+  aiWidth: Math.min(560, Math.max(300, Number(localStorage.getItem("lightmark-ai-width")) || 360)),
+  aiAssistantBody: null,
 };
 
 const SIDEBAR_MIN_WIDTH = 190;
 const SIDEBAR_MAX_WIDTH = 420;
 const SPLIT_DIVIDER_WIDTH = 7;
+const AI_MIN_WIDTH = 300;
+const AI_MAX_WIDTH = 560;
 
 const htmlCompletions = Object.freeze([
   { key: "br", label: "换到下一行", text: "<br>" },
@@ -188,6 +221,8 @@ listen("single-instance", (event) => {
   }
 }).catch(console.error);
 
+listen("codex-ai-event", (event) => handleAiEvent(event.payload)).catch(console.error);
+
 async function prepareRenderer() {
   elements.preview.src = "/preview.html";
 }
@@ -197,6 +232,7 @@ elements.preview.addEventListener("load", () => {
   elements.previewLoading.classList.add("hidden");
   bindPreviewLinks();
   elements.preview.contentWindow?.addEventListener("scroll", capturePreviewAlignment, { passive: true });
+  elements.preview.contentDocument?.addEventListener("selectionchange", updateAiContextSummary);
   renderPreview();
 });
 
@@ -359,6 +395,7 @@ function jumpToHeading(heading, index) {
 }
 
 async function loadDocument(path, { refreshSiblings = false } = {}) {
+  const previousPath = state.currentPath;
   const payload = await invoke("read_document", { path });
   if (refreshSiblings || state.currentDirectory !== payload.directory) {
     await refreshDirectory(payload.directory);
@@ -369,6 +406,7 @@ async function loadDocument(path, { refreshSiblings = false } = {}) {
   state.previewProgrammaticTarget = null;
   state.lastSavedText = payload.contents;
   elements.editor.value = payload.contents;
+  renderEditorOverlay();
   renderOutline();
   setFormatTool(null);
   elements.title.textContent = payload.name;
@@ -378,6 +416,9 @@ async function loadDocument(path, { refreshSiblings = false } = {}) {
   renderDocumentList();
   await renderPreview();
   updateCopyAvailability();
+  updateAiContextSummary();
+  updateAiControls();
+  if (previousPath && previousPath !== payload.path) resetAiConversation();
   if (!elements.findBar.hidden) refreshFindResults({ restart: true });
 }
 
@@ -486,11 +527,20 @@ function updateModeStatus() {
 
 function updateSyncControls() {
   const inSplit = state.mode === "split";
+  const manual = state.scrollSyncMode === "manual";
+  const calibrated = Math.abs(state.previewSyncOffset) > 1;
   elements.syncMode.value = state.scrollSyncMode;
   elements.syncMode.disabled = !inSplit;
-  elements.resetSync.disabled = !inSplit || state.scrollSyncMode !== "manual" || Math.abs(state.previewSyncOffset) <= 1;
+  elements.resetSync.disabled = !inSplit || !manual || !calibrated;
   elements.resetSync.classList.toggle("calibrated", !elements.resetSync.disabled);
   elements.resetSync.dataset.offset = String(state.previewSyncOffset);
+  elements.resetSync.title = !inSplit
+    ? "只在分栏模式使用"
+    : !manual
+      ? "先把同步方式改为“手动校准”"
+      : !calibrated
+        ? "当前已经对齐；请先手动滚动右侧预览"
+        : "清除手动位置差，并按编辑位置重新对齐";
   updateModeStatus();
 }
 
@@ -529,6 +579,7 @@ function setMode(mode) {
   });
   elements.paneSwap.disabled = mode !== "split";
   updateSyncControls();
+  updateCopyAvailability();
   if (mode === "reading") setFormatTool(null);
   if (mode === "reading") closeHtmlCompletion();
   if (mode !== "reading") elements.editor.focus();
@@ -833,15 +884,57 @@ function selectHtmlCompletion(index) {
   });
 }
 
+function syncEditorOverlayScroll() {
+  elements.editorOverlay.scrollTop = elements.editor.scrollTop;
+  elements.editorOverlay.scrollLeft = elements.editor.scrollLeft;
+}
+
+function renderEditorOverlay() {
+  elements.editorOverlay.innerHTML = `${renderEditorDecorations(elements.editor.value)}\n`;
+  syncEditorOverlayScroll();
+}
+
+function replaceEditorValue(nextText, selectionStart, selectionEnd) {
+  const previousText = elements.editor.value;
+  let prefixLength = 0;
+  while (
+    prefixLength < previousText.length
+    && prefixLength < nextText.length
+    && previousText[prefixLength] === nextText[prefixLength]
+  ) prefixLength += 1;
+
+  let suffixLength = 0;
+  while (
+    suffixLength < previousText.length - prefixLength
+    && suffixLength < nextText.length - prefixLength
+    && previousText[previousText.length - 1 - suffixLength] === nextText[nextText.length - 1 - suffixLength]
+  ) suffixLength += 1;
+
+  const replacement = nextText.slice(prefixLength, nextText.length - suffixLength);
+  elements.editor.focus();
+  elements.editor.setSelectionRange(prefixLength, previousText.length - suffixLength);
+
+  let insertedWithNativeUndo = false;
+  try {
+    insertedWithNativeUndo = document.execCommand("insertText", false, replacement);
+  } catch {
+    insertedWithNativeUndo = false;
+  }
+
+  if (!insertedWithNativeUndo || elements.editor.value !== nextText) {
+    elements.editor.value = nextText;
+    elements.editor.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  elements.editor.setSelectionRange(selectionStart, selectionEnd);
+  renderEditorOverlay();
+}
+
 function applyHtmlCompletion(index = state.completionIndex) {
   const completion = state.completionItems[index];
   const result = applyTextCompletion(elements.editor.value, state.completionContext, completion);
   if (!result.applied) return;
-  elements.editor.value = result.text;
-  elements.editor.focus();
-  elements.editor.setSelectionRange(result.selectionStart, result.selectionEnd);
+  replaceEditorValue(result.text, result.selectionStart, result.selectionEnd);
   closeHtmlCompletion();
-  elements.editor.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function updateHtmlCompletion() {
@@ -894,6 +987,11 @@ const formatToolDetails = {
   redText: { button: elements.redTextTool, label: "红色笔" },
 };
 
+const quickInsertDetails = {
+  indent: { button: elements.indentInsert, text: "&emsp;&emsp;", shortcut: "Alt+1" },
+  blankBreak: { button: elements.blankBreakInsert, text: "<br><br>", shortcut: "Alt+2" },
+};
+
 function setFormatTool(tool) {
   state.formatTool = tool;
   Object.entries(formatToolDetails).forEach(([name, details]) => {
@@ -919,13 +1017,24 @@ function applyEditorFormat(tool) {
     return false;
   }
 
-  elements.editor.value = result.text;
-  elements.editor.focus();
-  elements.editor.setSelectionRange(result.selectionStart, result.selectionEnd);
-  elements.editor.dispatchEvent(new Event("input", { bubbles: true }));
+  replaceEditorValue(result.text, result.selectionStart, result.selectionEnd);
   if (!state.formatTool) {
-    elements.formattingHint.textContent = result.removed ? "已移除文字标记" : "已添加文字标记";
+    const label = tool === "highlight" ? "黄色高光" : "红色文字";
+    elements.formattingHint.textContent = result.removed
+      ? `已移除${label} · Ctrl+Z 可撤销`
+      : `已添加${label} · Ctrl+Z 可撤销`;
   }
+  return true;
+}
+
+function insertQuickSyntax(detail) {
+  if (!state.currentPath || state.mode === "reading") return false;
+  const cursor = elements.editor.selectionStart;
+  const nextText = `${elements.editor.value.slice(0, cursor)}${detail.text}${elements.editor.value.slice(cursor)}`;
+  const nextCursor = cursor + detail.text.length;
+  replaceEditorValue(nextText, nextCursor, nextCursor);
+  elements.formattingHint.textContent = `已插入 ${detail.text} · Ctrl+Z 可撤销`;
+  closeHtmlCompletion();
   return true;
 }
 
@@ -965,7 +1074,11 @@ function cycleTheme() {
 }
 
 function updateCopyAvailability() {
-  elements.copyMenuToggle.disabled = !state.currentPath;
+  const noDocument = !state.currentPath;
+  elements.copyMenuToggle.disabled = noDocument;
+  Object.values(quickInsertDetails).forEach(({ button }) => {
+    button.disabled = noDocument || state.mode === "reading";
+  });
 }
 
 function setCopyMenu(openMenu) {
@@ -1203,17 +1316,245 @@ async function handleDroppedPath(path) {
   });
 }
 
+function setAiConnection(label, tone = "") {
+  elements.aiConnectionLabel.textContent = label;
+  elements.aiConnectionDot.className = `ai-connection-dot${tone ? ` ${tone}` : ""}`;
+}
+
+function updateAiControls() {
+  const canAsk = state.aiReady && state.aiSignedIn && Boolean(state.currentPath) && !state.aiBusy;
+  const answerDetails = answerModeDetails(currentAiAnswerMode());
+  elements.aiQuestion.disabled = !canAsk;
+  elements.aiSend.disabled = !canAsk || !elements.aiQuestion.value.trim();
+  elements.aiStop.hidden = !state.aiBusy;
+  elements.aiContextMode.disabled = state.aiBusy;
+  elements.aiAnswerMode.disabled = state.aiBusy;
+  elements.aiPrivacyNote.textContent = state.aiBusy
+    ? (currentAiAnswerMode() === "web" ? "Codex 正在联网查证" : "Codex 正在只读回答")
+    : answerDetails.privacy;
+}
+
+function updateAiWidth(width = state.aiWidth, { persist = false } = {}) {
+  const workspaceLimit = Math.max(AI_MIN_WIDTH, elements.workspace.clientWidth - 480);
+  state.aiWidth = Math.min(AI_MAX_WIDTH, workspaceLimit, Math.max(AI_MIN_WIDTH, width));
+  document.documentElement.style.setProperty("--ai-sidebar-width", `${Math.round(state.aiWidth)}px`);
+  elements.aiResizer.setAttribute("aria-valuenow", String(Math.round(state.aiWidth)));
+  if (persist) localStorage.setItem("lightmark-ai-width", String(state.aiWidth));
+}
+
+function editorSelectionText() {
+  const { selectionStart, selectionEnd, value } = elements.editor;
+  return selectionStart === selectionEnd ? "" : value.slice(selectionStart, selectionEnd);
+}
+
+function previewSelectionText() {
+  return elements.preview.contentWindow?.getSelection()?.toString() || "";
+}
+
+function aiSelectionText() {
+  const editorText = editorSelectionText();
+  const previewText = previewSelectionText();
+  if (state.mode === "reading") return previewText;
+  if (state.mode === "editing") return editorText;
+  return document.activeElement === elements.editor ? editorText : (previewText || editorText);
+}
+
+function currentAiContext() {
+  return chooseAiContext({
+    mode: elements.aiContextMode.value,
+    documentText: elements.editor.value,
+    editorSelection: aiSelectionText(),
+  });
+}
+
+function updateAiContextSummary() {
+  const context = currentAiContext();
+  elements.aiContextSummary.textContent = context.text
+    ? contextPreview(context.kind, context.text)
+    : (context.error || "没有资料");
+}
+
+function currentAiAnswerMode() {
+  return normalizeAnswerMode(elements.aiAnswerMode.value);
+}
+
+function updateAiAnswerMode() {
+  const details = answerModeDetails(currentAiAnswerMode());
+  elements.aiAnswerSummary.textContent = details.summary;
+  updateAiControls();
+}
+
+function scrollAiToEnd() {
+  requestAnimationFrame(() => {
+    elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
+  });
+}
+
+function appendAiMessage(role, text = "", context = "") {
+  elements.aiEmpty.hidden = true;
+  const messageElement = document.createElement("article");
+  messageElement.className = `ai-message ${role}`;
+  const header = document.createElement("div");
+  header.className = "ai-message-header";
+  header.textContent = role === "user" ? "你" : "CODEX";
+  const body = document.createElement("div");
+  body.className = "ai-message-body";
+  body.textContent = text;
+  messageElement.append(header, body);
+  if (context) {
+    const contextElement = document.createElement("div");
+    contextElement.className = "ai-message-context";
+    contextElement.textContent = context;
+    messageElement.append(contextElement);
+  }
+  elements.aiMessages.append(messageElement);
+  scrollAiToEnd();
+  return { element: messageElement, body };
+}
+
+function resetAiConversation({ notifyBackend = true } = {}) {
+  elements.aiMessages.querySelectorAll(".ai-message").forEach((item) => item.remove());
+  elements.aiEmpty.hidden = false;
+  state.aiAssistantBody = null;
+  state.aiBusy = false;
+  updateAiControls();
+  if (notifyBackend && state.aiReady) {
+    invoke("codex_new_conversation").catch((error) => console.error("无法重置 Codex 对话", error));
+  }
+}
+
+async function connectAi() {
+  state.aiReady = false;
+  state.aiSignedIn = false;
+  setAiConnection("正在查找本机 Codex…", "connecting");
+  updateAiControls();
+  try {
+    const status = await invoke("codex_status");
+    if (!status.available) throw new Error("没有找到 Codex CLI。请先安装并登录 Codex。 ");
+    if (status.version) elements.aiModelLabel.textContent = status.version.replace(/^codex-cli\s*/i, "CLI ");
+    await invoke("codex_connect");
+  } catch (error) {
+    state.aiReady = false;
+    setAiConnection("Codex 连接失败", "error");
+    elements.aiPrivacyNote.textContent = String(error);
+    updateAiControls();
+  }
+}
+
+function setAiOpen(open) {
+  state.aiOpen = open;
+  elements.aiSidebar.hidden = !open;
+  elements.aiResizer.hidden = !open;
+  elements.aiToggle.setAttribute("aria-expanded", String(open));
+  elements.aiToggle.title = open ? "收起 Codex AI 助读侧栏" : "打开 Codex AI 助读侧栏";
+  if (open) {
+    updateAiWidth();
+    if (!state.aiReady) connectAi();
+    setTimeout(() => elements.aiQuestion.focus(), 180);
+  }
+  updateSplitLayout();
+}
+
+function handleAiEvent(payload) {
+  if (!payload || typeof payload.kind !== "string") return;
+  if (payload.kind === "connecting") {
+    setAiConnection("正在连接 Codex…", "connecting");
+  } else if (payload.kind === "ready") {
+    state.aiReady = true;
+    setAiConnection("已连接，正在检查登录…", "ready");
+  } else if (payload.kind === "account") {
+    state.aiSignedIn = Boolean(payload.signedIn);
+    setAiConnection(accountLabel(payload), state.aiSignedIn ? "ready" : "error");
+    if (!state.aiSignedIn) elements.aiPrivacyNote.textContent = "请先在 Codex 中登录 ChatGPT";
+  } else if (payload.kind === "model") {
+    elements.aiModelLabel.textContent = payload.displayName || payload.model || elements.aiModelLabel.textContent;
+  } else if (payload.kind === "turn-starting") {
+    setAiConnection(currentAiAnswerMode() === "web" ? "Codex 准备联网查证…" : "Codex 正在阅读…", "connecting");
+  } else if (payload.kind === "web-search") {
+    setAiConnection("Codex 正在联网查证…", "connecting");
+  } else if (payload.kind === "delta") {
+    if (state.aiAssistantBody) state.aiAssistantBody.textContent += payload.text || "";
+    scrollAiToEnd();
+  } else if (payload.kind === "done") {
+    state.aiBusy = false;
+    state.aiAssistantBody?.closest(".ai-message")?.classList.remove("pending");
+    if (state.aiAssistantBody && !state.aiAssistantBody.textContent.trim()) {
+      state.aiAssistantBody.textContent = payload.status === "interrupted" ? "回答已停止。" : "Codex 没有返回文字。";
+    }
+    setAiConnection(accountLabel({ signedIn: state.aiSignedIn }), state.aiSignedIn ? "ready" : "error");
+  } else if (payload.kind === "error" || payload.kind === "safety-block") {
+    state.aiBusy = false;
+    const target = state.aiAssistantBody
+      ? { element: state.aiAssistantBody.closest(".ai-message"), body: state.aiAssistantBody }
+      : appendAiMessage("assistant");
+    target.element?.classList.remove("pending");
+    target.element?.classList.add("error");
+    target.body.textContent = payload.message || "Codex 发生错误。";
+    setAiConnection("本次回答未完成", "error");
+  } else if (payload.kind === "disconnected") {
+    state.aiReady = false;
+    state.aiSignedIn = false;
+    state.aiBusy = false;
+    setAiConnection("Codex 已断开", "error");
+  } else if (payload.kind === "notice") {
+    elements.aiPrivacyNote.textContent = payload.message || "Codex 提示";
+  } else if (payload.kind === "diagnostic") {
+    console.warn("Codex App Server", payload.message);
+  }
+  updateAiControls();
+}
+
+async function askCodex() {
+  const question = elements.aiQuestion.value.trim();
+  if (!question || state.aiBusy) return;
+  const context = currentAiContext();
+  if (!context.text) {
+    elements.aiPrivacyNote.textContent = context.error;
+    elements.aiContextSummary.textContent = context.error;
+    return;
+  }
+  const answerMode = currentAiAnswerMode();
+  const answerDetails = answerModeDetails(answerMode);
+  appendAiMessage("user", question, `${contextPreview(context.kind, context.text)} · ${answerDetails.label}`);
+  const assistant = appendAiMessage("assistant");
+  assistant.element.classList.add("pending");
+  state.aiAssistantBody = assistant.body;
+  state.aiBusy = true;
+  elements.aiQuestion.value = "";
+  updateAiControls();
+  try {
+    await invoke("codex_ask", {
+      request: {
+        question,
+        documentTitle: elements.title.textContent || "Markdown 文档",
+        contextKind: context.kind,
+        context: context.text,
+        answerMode,
+      },
+    });
+  } catch (error) {
+    state.aiBusy = false;
+    assistant.element.classList.remove("pending");
+    assistant.element.classList.add("error");
+    assistant.body.textContent = String(error);
+    updateAiControls();
+  }
+}
+
 async function showError(title, error) {
   console.error(title, error);
   await message(String(error), { title, kind: "error" });
 }
 
 elements.editor.addEventListener("input", () => {
+  renderEditorOverlay();
   setDirty(elements.editor.value !== state.lastSavedText);
   renderOutline();
   renderPreview();
   if (!elements.findBar.hidden && state.mode !== "reading") refreshFindResults();
   updateHtmlCompletion();
+  updateAiContextSummary();
+  updateAiControls();
 });
 elements.editor.addEventListener("keydown", (event) => {
   if (elements.htmlCompletion.hidden) return;
@@ -1232,6 +1573,7 @@ elements.editor.addEventListener("keydown", (event) => {
   }
 });
 elements.editor.addEventListener("scroll", () => {
+  syncEditorOverlayScroll();
   positionHtmlCompletion();
   syncPreviewToEditor();
 }, { passive: true });
@@ -1244,11 +1586,41 @@ elements.editor.addEventListener("mouseup", () => {
   if (state.formatTool && elements.editor.selectionStart !== elements.editor.selectionEnd) {
     requestAnimationFrame(() => applyEditorFormat(state.formatTool));
   }
+  updateAiContextSummary();
 });
 elements.openFile.addEventListener("click", () => chooseFile().catch((error) => showError("无法打开文件", error)));
 elements.openFolder.addEventListener("click", () => chooseFolder().catch((error) => showError("无法打开文件夹", error)));
 elements.saveFile.addEventListener("click", () => saveDocument().catch((error) => showError("无法保存文件", error)));
 elements.saveAs.addEventListener("click", () => saveDocumentAs().catch((error) => showError("无法另存文件", error)));
+elements.aiToggle.addEventListener("click", () => setAiOpen(!state.aiOpen));
+elements.aiClose.addEventListener("click", () => setAiOpen(false));
+elements.aiNewChat.addEventListener("click", () => resetAiConversation());
+elements.aiContextMode.addEventListener("change", updateAiContextSummary);
+elements.aiAnswerMode.addEventListener("change", () => {
+  updateAiAnswerMode();
+  resetAiConversation();
+});
+elements.aiQuestion.addEventListener("input", updateAiControls);
+elements.aiQuestion.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    elements.aiForm.requestSubmit();
+  }
+});
+elements.aiForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  askCodex();
+});
+elements.aiStop.addEventListener("click", () => {
+  invoke("codex_interrupt").catch((error) => {
+    elements.aiPrivacyNote.textContent = String(error);
+  });
+});
+elements.aiSuggestions.forEach((button) => button.addEventListener("click", () => {
+  elements.aiQuestion.value = button.dataset.aiPrompt || "";
+  updateAiControls();
+  elements.aiQuestion.focus();
+}));
 elements.previous.addEventListener("click", () => navigate(-1).catch((error) => showError("无法打开上一篇", error)));
 elements.next.addEventListener("click", () => navigate(1).catch((error) => showError("无法打开下一篇", error)));
 elements.modeButtons.forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
@@ -1280,6 +1652,15 @@ elements.splitResizer.addEventListener("pointerdown", beginResize(
     { persist: true },
   ),
 ));
+elements.aiResizer.addEventListener("pointerdown", beginResize(
+  elements.aiResizer,
+  "is-resizing-ai",
+  (event) => {
+    const workspaceRight = elements.workspace.getBoundingClientRect().right;
+    updateAiWidth(workspaceRight - event.clientX);
+  },
+  () => updateAiWidth(state.aiWidth, { persist: true }),
+));
 elements.sidebarResizer.addEventListener("keydown", (event) => {
   const changes = { ArrowLeft: -12, ArrowRight: 12, Home: SIDEBAR_MIN_WIDTH, End: SIDEBAR_MAX_WIDTH };
   if (!(event.key in changes)) return;
@@ -1302,6 +1683,12 @@ elements.copyMenuToggle.addEventListener("click", () => setCopyMenu(elements.cop
 elements.copyMenuItems.forEach((button) => {
   button.addEventListener("click", () => copyDocument(button.dataset.copyMode).catch((error) => showError("无法复制文档", error)));
 });
+elements.aiResizer.addEventListener("keydown", (event) => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const widths = { ArrowLeft: state.aiWidth + 12, ArrowRight: state.aiWidth - 12, Home: AI_MAX_WIDTH, End: AI_MIN_WIDTH };
+  updateAiWidth(widths[event.key], { persist: true });
+});
 elements.findInput.addEventListener("input", () => refreshFindResults());
 elements.findInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
@@ -1323,6 +1710,10 @@ for (const [tool, details] of Object.entries(formatToolDetails)) {
   details.button.addEventListener("mousedown", (event) => event.preventDefault());
   details.button.addEventListener("click", () => handleFormatToolClick(tool));
 }
+Object.values(quickInsertDetails).forEach((detail) => {
+  detail.button.addEventListener("mousedown", (event) => event.preventDefault());
+  detail.button.addEventListener("click", () => insertQuickSyntax(detail));
+});
 elements.cancelPending.addEventListener("click", () => {
   state.pendingAction = null;
   elements.unsavedDialog.close();
@@ -1362,6 +1753,14 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   const control = event.ctrlKey || event.metaKey;
+  const quickInsert = event.altKey && !control && !event.shiftKey && document.activeElement === elements.editor
+    ? (event.code === "Digit1" ? quickInsertDetails.indent : event.code === "Digit2" ? quickInsertDetails.blankBreak : null)
+    : null;
+  if (quickInsert) {
+    event.preventDefault();
+    insertQuickSyntax(quickInsert);
+    return;
+  }
   if (event.key === "F11") {
     event.preventDefault();
     toggleFullscreen().catch((error) => showError("无法切换全屏幕", error));
@@ -1399,7 +1798,11 @@ document.addEventListener("keydown", (event) => {
     toggleSidebar();
     return;
   }
-  if (state.mode === "reading" && !elements.syntaxDialog.open && !elements.unsavedDialog.open) {
+  const typingTarget = event.target instanceof HTMLInputElement
+    || event.target instanceof HTMLTextAreaElement
+    || event.target instanceof HTMLSelectElement
+    || event.target?.isContentEditable;
+  if (state.mode === "reading" && !typingTarget && !elements.syntaxDialog.open && !elements.unsavedDialog.open) {
     if (event.key === "ArrowLeft") {
       event.preventDefault();
       navigate(-1).catch((error) => showError("无法打开上一篇", error));
@@ -1425,6 +1828,7 @@ getCurrentWindow().onCloseRequested((event) => {
 async function start() {
   applyTheme(state.theme);
   initializeSyntaxCopyButtons();
+  renderEditorOverlay();
   updateCopyAvailability();
   try {
     updateFullscreenButton(await getCurrentWindow().isFullscreen());
@@ -1432,6 +1836,10 @@ async function start() {
     updateFullscreenButton(Boolean(document.fullscreenElement));
   }
   updateSidebarWidth();
+  updateAiWidth();
+  updateAiContextSummary();
+  updateAiAnswerMode();
+  updateAiControls();
   updatePaneOrder();
   setMode("reading");
   await prepareRenderer();
@@ -1446,6 +1854,7 @@ async function start() {
 
 new ResizeObserver(() => {
   updateSidebarWidth();
+  updateAiWidth();
   updateSplitLayout();
   scheduleScrollAnchorRebuild();
   positionHtmlCompletion();
