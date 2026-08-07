@@ -1,6 +1,6 @@
 [package]
 name = "lightmark"
-version = "0.5.1"
+version = "0.5.2"
 description = "轻量、离线的 Markdown 阅读与编辑器"
 authors = ["Willie Wei"]
 license = "MIT"
