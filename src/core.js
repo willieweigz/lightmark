@@ -31,6 +31,36 @@ export function directoryFromPath(path) {
   return index >= 0 ? normalized.slice(0, index) : "";
 }
 
+export function findTextMatches(source, query, locale = "zh-CN") {
+  if (!query) return [];
+  const haystack = source.toLocaleLowerCase(locale);
+  const needle = query.toLocaleLowerCase(locale);
+  const matches = [];
+  let offset = 0;
+  while (offset <= haystack.length - needle.length) {
+    const index = haystack.indexOf(needle, offset);
+    if (index < 0) break;
+    matches.push(index);
+    offset = index + Math.max(1, needle.length);
+  }
+  return matches;
+}
+
+export function mapScrollByAnchors(position, anchors) {
+  if (!anchors.length) return 0;
+  if (position <= anchors[0].editor) return anchors[0].preview;
+  for (let index = 1; index < anchors.length; index += 1) {
+    const previous = anchors[index - 1];
+    const next = anchors[index];
+    if (position > next.editor) continue;
+    const span = next.editor - previous.editor;
+    if (span <= 0) return next.preview;
+    const progress = (position - previous.editor) / span;
+    return previous.preview + (next.preview - previous.preview) * progress;
+  }
+  return anchors[anchors.length - 1].preview;
+}
+
 function plainHeadingText(value) {
   return value
     .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")

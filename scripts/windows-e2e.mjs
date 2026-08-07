@@ -27,8 +27,14 @@ const browser = await chromium.connectOverCDP(endpoint);
 const pages = browser.contexts().flatMap((context) => context.pages());
 const page = pages.find((candidate) => /tauri|localhost/i.test(candidate.url())) || pages[0];
 assert(page, "没有找到轻阅 Markdown 的 WebView2 页面");
+const pageErrors = [];
+page.on("pageerror", (error) => pageErrors.push(error.message));
 
 await page.waitForLoadState("domcontentloaded");
+await page.evaluate(() => {
+  document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
+});
+await page.getByRole("button", { name: "阅读", exact: true }).click();
 await page.locator(".document-item").first().waitFor({ state: "visible", timeout: 15_000 });
 await page.locator(".document-item").first().click();
 await page.locator("#page-indicator").filter({ hasText: "1 / 3" }).waitFor();
@@ -61,6 +67,28 @@ assert(await preview.locator(".wikilink").count() === 1, "Wiki Link 未渲染");
 const imageSource = await preview.locator("img[alt='轻阅 Markdown 离线图片']").getAttribute("src");
 assert(imageSource?.startsWith("data:image/svg+xml;base64,"), "相对路径图片未通过 Rust 从磁盘离线加载");
 record("GFM、表格、代码块、Callout、Frontmatter、Wiki Link、相对图片");
+
+await page.keyboard.press("Control+f");
+await page.locator("#document-find").waitFor({ state: "visible" });
+assert(!await page.locator("#syntax-dialog").isVisible(), "Ctrl+F 仍然打开了语法速查");
+await page.locator("#find-input").fill("Callout");
+await page.locator("#find-count").filter({ hasText: /1 \/ [1-9]/ }).waitFor();
+await page.locator("#find-next").click();
+await page.locator("#find-close").click();
+assert(await page.locator("#document-find").isHidden(), "文内查找无法关闭");
+record("Ctrl+F 文内查找、结果计数与前后跳转");
+
+await page.locator("#copy-menu-toggle").click();
+assert(await page.locator("#copy-menu [data-copy-mode]").count() === 3, "文档复制菜单不是三种格式");
+await page.locator("#copy-menu [data-copy-mode='markdown']").click();
+await page.locator("#save-status").filter({ hasText: "Markdown 原文已复制" }).waitFor();
+await page.locator("#copy-menu-toggle").click();
+await page.locator("#copy-menu [data-copy-mode='plain']").click();
+await page.locator("#save-status").filter({ hasText: "纯文本已复制" }).waitFor();
+await page.locator("#copy-menu-toggle").click();
+await page.locator("#copy-menu [data-copy-mode='rich']").click();
+await page.locator("#save-status").filter({ hasText: "富文本已复制" }).waitFor();
+record("Markdown 原文、纯文本与富文本三种复制入口");
 
 await page.locator("#outline-tab").click();
 const initialOutline = await page.locator("#outline-list .outline-item").allTextContents();
@@ -177,6 +205,27 @@ assert(redColor !== highlightStyle.color, "红色文字没有显示为红色");
   });
   record("分栏编辑滚动时预览自动同步跟随");
 
+  await editor.evaluate((element) => {
+    element.scrollTop = (element.scrollHeight - element.clientHeight) * 0.45;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForTimeout(180);
+  const automaticPreviewY = await preview.locator("body").evaluate(() => window.scrollY);
+  const previewRangeForAlignment = await preview.locator("body").evaluate(() => Math.max(0, document.scrollingElement.scrollHeight - innerHeight));
+  assert(previewRangeForAlignment > automaticPreviewY + 100, "测试文档预览空间不足，无法验证手动对齐偏移");
+  await preview.locator("body").evaluate((_, target) => window.scrollTo(0, target), automaticPreviewY + 80);
+  await page.waitForTimeout(180);
+  const manuallyAlignedY = await preview.locator("body").evaluate(() => window.scrollY);
+  await editor.evaluate((element) => {
+    element.scrollTop += 12;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForTimeout(220);
+  const previewAfterEditorMove = await preview.locator("body").evaluate(() => window.scrollY);
+  assert(previewAfterEditorMove >= manuallyAlignedY - 4, `手动对齐被编辑区滚动覆盖：${manuallyAlignedY} → ${previewAfterEditorMove}`);
+  assert(previewAfterEditorMove - manuallyAlignedY < 80, "编辑区小幅移动导致预览大幅跳动");
+  record("标题锚点同步与手动微调后的对齐偏移保留");
+
   await editor.press("Control+End");
 await editor.type("\n\n## Ctrl+S 验收\n已从磁盘真实回读。\n\n<script>window.__lightmarkPwned = true</script>\n<img src=\"missing.png\" onerror=\"window.__lightmarkPwned=true\">", { delay: 1 });
 await page.getByRole("button", { name: "分栏" }).click();
@@ -190,6 +239,23 @@ await page.locator("#save-status").filter({ hasText: "已保存" }).waitFor();
 const diskText = await readFile(savedDocumentPath, "utf8");
 assert(diskText.includes("已从磁盘真实回读。"), "Ctrl+S 后磁盘文件没有真实写入修改");
 record("实时分栏预览、DOMPurify 脚本阻止、Ctrl+S 磁盘回读");
+
+await editor.press("Control+End");
+await editor.type("\n\n## 本地链接验收\n![[images/lightmark-sample.svg|240]]\n\n[[10-第十页|Wiki 跳转第十页]]\n[Markdown 跳转第十页](10-第十页.md)", { delay: 1 });
+await page.keyboard.press("Control+s");
+const obsidianImage = preview.locator("img.obsidian-image");
+await obsidianImage.waitFor();
+await page.waitForFunction(() => document.querySelector("#preview")?.contentDocument?.querySelector("img.obsidian-image")?.getAttribute("src")?.startsWith("data:image/svg+xml;base64,"));
+assert((await obsidianImage.getAttribute("src"))?.startsWith("data:image/svg+xml;base64,"), "Obsidian 图片没有从相对路径离线加载");
+assert(await obsidianImage.getAttribute("width") === "240", "Obsidian 图片宽度参数没有保留");
+await preview.getByText("Markdown 跳转第十页", { exact: true }).click();
+await page.locator("#page-indicator").filter({ hasText: "3 / 3" }).waitFor();
+await page.locator(".document-item").filter({ hasText: "02-第二页.md" }).click();
+await preview.getByText("Wiki 跳转第十页", { exact: true }).click();
+await page.locator("#page-indicator").filter({ hasText: "3 / 3" }).waitFor();
+await page.locator(".document-item").filter({ hasText: "02-第二页.md" }).click();
+await page.locator("#page-indicator").filter({ hasText: "2 / 3" }).waitFor();
+record("Obsidian 图片显示、相对 Markdown 链接与 Wiki Link 点击跳转");
 
 await editor.press("Control+End");
 await editor.type("\n未保存保护验收");
@@ -209,22 +275,27 @@ await page.locator("#page-indicator").filter({ hasText: "2 / 3" }).waitFor();
 await page.getByRole("button", { name: "阅读" }).click();
 await page.locator("#syntax-help").click();
 await page.locator("#syntax-dialog").waitFor({ state: "visible" });
-  assert(await page.locator("#syntax-grid article").count() === 15, "语法速查条目不完整");
-await page.locator("#syntax-search").fill("Callout");
-assert(await page.locator("#syntax-grid article:visible").count() === 1, "语法速查筛选不正确");
-const calloutGuide = await text(page.locator("#syntax-grid article:visible"));
+  assert(await page.locator("#syntax-grid article").count() === 18, "语法速查条目不完整");
+  assert(await page.locator("#syntax-search").count() === 0, "语法速查仍保留了不需要的搜索框");
+  assert(await page.locator(".syntax-copy-button").count() === 31, "语法复制模板数量不完整");
+const calloutGuide = await text(page.locator("#syntax-grid article[data-syntax='callout']"));
 assert(calloutGuide.includes("Callout"), "语法速查缺少 Callout");
 assert(["note", "abstract", "info", "todo", "tip", "success", "question", "warning", "failure", "danger", "bug", "example", "quote"].every((type) => calloutGuide.includes(type)), "语法速查缺少官方 Callout 类型");
 assert(["summary", "tldr", "hint", "important", "check", "done", "help", "faq", "caution", "attention", "fail", "missing", "error", "cite"].every((alias) => calloutGuide.includes(alias)), "语法速查缺少 Callout 别名");
   assert(calloutGuide.includes("默认收起") && calloutGuide.includes("默认展开") && calloutGuide.includes("多层嵌套"), "语法速查缺少 Callout 折叠或嵌套示例");
+  await page.locator("#syntax-grid article[data-syntax='callout'] .syntax-copy-button").filter({ hasText: "基础 Callout" }).click();
+  await page.locator("#syntax-grid article[data-syntax='callout'] .syntax-copy-button.copied").waitFor();
   await page.screenshot({ path: syntaxScreenshotPath });
-  await page.locator("#syntax-search").fill("段首");
-  assert(await page.locator("#syntax-grid article:visible").count() === 1, "段落与缩进语法筛选不正确");
-  const paragraphGuide = await text(page.locator("#syntax-grid article:visible"));
-  assert(paragraphGuide.includes("空一整行") || paragraphGuide.includes("第一段文字"), "语法速查缺少空行分段示例");
-  assert(paragraphGuide.includes("4 个半角空格") && paragraphGuide.includes("全角空格"), "语法速查缺少中文段首缩进提醒");
+  const paragraphGuide = await text(page.locator("#syntax-grid article[data-syntax='paragraph']"));
+  assert(["段首空两格", "空出一整行"].every((label) => paragraphGuide.includes(label)), "段落速查缺少段首缩进或明显留白");
+  assert(!paragraphGuide.includes("另起一段") && !paragraphGuide.includes("只换下一行"), "段落速查保留了不需要的普通编辑说明");
+  assert(paragraphGuide.includes("两个中文全角空格") && paragraphGuide.includes("不要用半角空格"), "语法速查缺少中文段首缩进提醒");
+  assert(paragraphGuide.includes("<br><br>") && paragraphGuide.includes("连续按很多次 Enter"), "语法速查缺少明显留白说明");
+  assert(await page.locator("#syntax-grid article[data-syntax='inline-code']").count() === 1, "语法速查缺少行内代码");
+  assert(await page.locator("#syntax-grid article[data-syntax='divider']").count() === 1, "语法速查缺少分隔线与转义");
+  assert(await page.locator("#syntax-grid article[data-syntax='obsidian-image']").count() === 1, "语法速查缺少 Obsidian 图片");
   await page.locator("#syntax-dialog .dialog-header button").click();
-  record("Markdown 语法速查、搜索、空行分段与中文段首说明");
+  record("完整语法速查、Callout/段落模板一键复制与常用扩展");
 
 await page.locator("#theme-toggle").click();
 assert(await page.locator("html").getAttribute("data-theme") === "light", "未切换到浅色主题");
@@ -234,9 +305,16 @@ await page.locator("#theme-toggle").click();
 assert(await page.locator("html").getAttribute("data-theme") === null, "未恢复跟随系统主题");
   record("浅色、深色与跟随 Windows 系统主题");
 
+await page.locator("#fullscreen-toggle").click();
+await page.locator("#fullscreen-toggle").filter({ hasText: "退出全屏" }).waitFor();
+await page.keyboard.press("F11");
+await page.locator("#fullscreen-toggle").filter({ hasText: /^全屏$/ }).waitFor();
+record("全屏按钮与 F11 进入/退出全屏幕");
+
   await page.locator("#sidebar-resizer").focus();
   await page.locator("#sidebar-resizer").press("Home");
   await page.waitForFunction(() => document.querySelector("#sidebar")?.getBoundingClientRect().width < 200);
+  await page.waitForTimeout(220);
   const sidebarWidthBeforeDrag = (await page.locator("#sidebar").boundingBox())?.width || 0;
   const sidebarDivider = await page.locator("#sidebar-resizer").boundingBox();
   assert(sidebarDivider, "没有找到文档列表分隔条");
@@ -245,7 +323,7 @@ assert(await page.locator("html").getAttribute("data-theme") === null, "未恢�
   await page.mouse.move(sidebarDivider.x + sidebarDivider.width / 2 + 48, sidebarDivider.y + 120, { steps: 6 });
   await page.mouse.up();
   const sidebarWidthAfterDrag = (await page.locator("#sidebar").boundingBox())?.width || 0;
-  assert(sidebarWidthAfterDrag > sidebarWidthBeforeDrag + 25, "文档列表分隔条拖动后宽度没有变化");
+  assert(sidebarWidthAfterDrag > sidebarWidthBeforeDrag + 25, `文档列表分隔条拖动后宽度没有变化：${sidebarWidthBeforeDrag} → ${sidebarWidthAfterDrag}`);
   assert(Number(await page.evaluate(() => localStorage.getItem("lightmark-sidebar-width"))) > sidebarWidthBeforeDrag, "文档列表宽度没有记忆");
   await page.locator("#collapse-sidebar").click();
 assert(await page.locator("#sidebar").evaluate((element) => element.classList.contains("collapsed")), "侧栏未收起");
@@ -268,6 +346,7 @@ if (appPath && secondaryDocumentPath) {
 
 await mkdir(resolve("work"), { recursive: true });
 await page.screenshot({ path: screenshotPath });
+assert(pageErrors.length === 0, `页面运行错误：${pageErrors.join(" | ")}`);
 
 console.log(JSON.stringify({
   appUrl: page.url(),

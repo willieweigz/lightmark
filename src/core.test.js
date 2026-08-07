@@ -3,11 +3,13 @@ import { describe, it } from "node:test";
 import {
   directoryFromPath,
   extractHeadings,
+  findTextMatches,
   fileNameFromPath,
   formatSelection,
   isExternalUrl,
   isMarkdownName,
   isRelativeImageSource,
+  mapScrollByAnchors,
   sortDocuments,
 } from "./core.js";
 
@@ -35,6 +37,23 @@ describe("Markdown document helpers", () => {
     const path = "D:\\资料 归档\\中文目录\\01-开始.md";
     assert.equal(fileNameFromPath(path), "01-开始.md");
     assert.equal(directoryFromPath(path), "D:\\资料 归档\\中文目录");
+  });
+
+  it("finds document text case-insensitively in reading order", () => {
+    assert.deepEqual(findTextMatches("Markdown 与 markdown，再来一个 MARKDOWN", "markdown"), [0, 11, 25]);
+    assert.deepEqual(findTextMatches("轻阅 Markdown", ""), []);
+  });
+
+  it("maps editor scroll between matching content anchors", () => {
+    const anchors = [
+      { editor: 0, preview: 0 },
+      { editor: 100, preview: 220 },
+      { editor: 300, preview: 500 },
+    ];
+    assert.equal(mapScrollByAnchors(-10, anchors), 0);
+    assert.equal(mapScrollByAnchors(50, anchors), 110);
+    assert.equal(mapScrollByAnchors(200, anchors), 360);
+    assert.equal(mapScrollByAnchors(400, anchors), 500);
   });
 
   it("distinguishes external links and relative images", () => {

@@ -78,7 +78,19 @@
   };
   const esc = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   function inlineWiki(md) {
-    return md.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_,target,label) => `<span class="wikilink" title="${esc(target)}">${esc(label || target)}</span>`);
+    const withImages = md.replace(/!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (source,target,size) => {
+      const cleanTarget = target.trim();
+      if (!/\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(cleanTarget.split(/[?#]/)[0])) return source;
+      const dimensions = String(size || '').trim().match(/^(\d{1,4})(?:x(\d{1,4}))?$/);
+      const marker = dimensions ? dimensions.slice(1).filter(Boolean).join('x') : '';
+      const alt = (cleanTarget.split(/[\\/]/).pop() || 'Obsidian 图片').replace(/([\]\\])/g,'\\$1');
+      return `![${alt}](${encodeURIComponent(cleanTarget)} "lightmark-obsidian:${marker}")`;
+    });
+    return withImages.replace(/(^|[^!])\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/gm, (_,prefix,target,label) => {
+      const cleanTarget=target.trim();
+      const cleanLabel=String(label || target).trim().replace(/([\]\\])/g,'\\$1');
+      return `${prefix}[${cleanLabel}](# "lightmark-wiki:${encodeURIComponent(cleanTarget)}")`;
+    });
   }
   function frontmatter(md) {
     if (!md.startsWith('---\n')) return {head:'', body:md};
@@ -117,7 +129,22 @@
   window.lightmarkRender = md => {
     const fm=frontmatter(md);
     const html=fm.head+renderBlocks(fm.body);
-    document.getElementById('page').innerHTML=DOMPurify.sanitize(html,{ADD_TAGS:['aside','details','summary'],ADD_ATTR:['class','open','title','data-callout']});
+    const page=document.getElementById('page');
+    page.innerHTML=DOMPurify.sanitize(html,{ADD_TAGS:['aside','details','summary'],ADD_ATTR:['class','open','title','data-callout','data-wiki-target']});
+    page.querySelectorAll('img[title^="lightmark-obsidian:"]').forEach(image => {
+      const dimensions=image.title.slice('lightmark-obsidian:'.length).match(/^(\d{1,4})(?:x(\d{1,4}))?$/);
+      image.classList.add('obsidian-image');
+      if (dimensions) image.width=Number(dimensions[1]);
+      if (dimensions?.[2]) image.height=Number(dimensions[2]);
+      image.removeAttribute('title');
+    });
+    page.querySelectorAll('a[title^="lightmark-wiki:"]').forEach(link => {
+      const target=decodeURIComponent(link.title.slice('lightmark-wiki:'.length));
+      link.classList.add('wikilink');
+      link.dataset.wikiTarget=target;
+      link.title=`打开 ${target}`;
+      link.href='#';
+    });
   };
   window.lightmarkSetScale = scale => document.documentElement.style.setProperty('--scale',scale);
 </script>
