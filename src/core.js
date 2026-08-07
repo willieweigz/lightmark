@@ -31,6 +31,67 @@ export function directoryFromPath(path) {
   return index >= 0 ? normalized.slice(0, index) : "";
 }
 
+export function findTextMatches(source, query, locale = "zh-CN") {
+  if (!query) return [];
+  const haystack = source.toLocaleLowerCase(locale);
+  const needle = query.toLocaleLowerCase(locale);
+  const matches = [];
+  let offset = 0;
+  while (offset <= haystack.length - needle.length) {
+    const index = haystack.indexOf(needle, offset);
+    if (index < 0) break;
+    matches.push(index);
+    offset = index + Math.max(1, needle.length);
+  }
+  return matches;
+}
+
+export function mapScrollByAnchors(position, anchors) {
+  if (!anchors.length) return 0;
+  if (position <= anchors[0].editor) return anchors[0].preview;
+  for (let index = 1; index < anchors.length; index += 1) {
+    const previous = anchors[index - 1];
+    const next = anchors[index];
+    if (position > next.editor) continue;
+    const span = next.editor - previous.editor;
+    if (span <= 0) return next.preview;
+    const progress = (position - previous.editor) / span;
+    return previous.preview + (next.preview - previous.preview) * progress;
+  }
+  return anchors[anchors.length - 1].preview;
+}
+
+export function findHtmlCompletionContext(source, cursor) {
+  if (!Number.isInteger(cursor) || cursor < 0 || cursor > source.length) return null;
+  const lineStart = Math.max(source.lastIndexOf("\n", cursor - 1), source.lastIndexOf("\r", cursor - 1)) + 1;
+  const fragment = source.slice(lineStart, cursor);
+  const match = fragment.match(/<([a-z]*)$/i);
+  if (!match) return null;
+  const start = lineStart + match.index;
+  if (start > 0 && source[start - 1] === "<") return null;
+  return { start, end: cursor, query: match[1].toLocaleLowerCase() };
+}
+
+export function applyTextCompletion(source, context, completion) {
+  const validContext = context
+    && Number.isInteger(context.start)
+    && Number.isInteger(context.end)
+    && context.start >= 0
+    && context.end >= context.start
+    && context.end <= source.length;
+  if (!validContext || typeof completion?.text !== "string") {
+    return { text: source, applied: false };
+  }
+  const selectionStart = context.start + (completion.selectionStart ?? completion.text.length);
+  const selectionEnd = context.start + (completion.selectionEnd ?? completion.selectionStart ?? completion.text.length);
+  return {
+    text: source.slice(0, context.start) + completion.text + source.slice(context.end),
+    selectionStart,
+    selectionEnd,
+    applied: true,
+  };
+}
+
 function plainHeadingText(value) {
   return value
     .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")

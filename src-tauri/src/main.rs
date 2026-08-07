@@ -5,7 +5,7 @@ use percent_encoding::percent_decode_str;
 use serde::Serialize;
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 use tauri::{Emitter, Manager};
 
@@ -134,6 +134,46 @@ fn read_relative_image(document_path: String, source: String) -> Result<String, 
 }
 
 #[tauri::command]
+fn resolve_markdown_link(document_path: String, target: String) -> Result<String, String> {
+    let document = canonical_markdown(Path::new(&document_path))?;
+    let raw_target = target.split(['?', '#']).next().unwrap_or_default().trim();
+    if raw_target.is_empty() {
+        return Err("链接没有指定 Markdown 文档。".into());
+    }
+    let decoded = percent_decode_str(raw_target)
+        .decode_utf8()
+        .map_err(|_| "链接路径不是有效的 UTF-8。")?;
+    let relative = Path::new(decoded.as_ref());
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err("只允许打开当前文件夹内的相对 Markdown 链接。".into());
+    }
+
+    let directory = document.parent().ok_or("无法确定当前文档目录。")?;
+    let mut candidates = vec![directory.join(relative)];
+    if relative.extension().is_none() {
+        candidates.push(directory.join(relative).with_extension("md"));
+        candidates.push(directory.join(relative).with_extension("markdown"));
+    }
+
+    for candidate in candidates {
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
+        if canonical.starts_with(directory) && canonical.is_file() && is_markdown(&canonical) {
+            return Ok(path_string(&canonical));
+        }
+    }
+    Err(format!("找不到链接对应的 Markdown 文档：{}", decoded))
+}
+
+#[tauri::command]
 fn startup_paths() -> Vec<String> {
     std::env::args_os()
         .skip(1)
@@ -159,6 +199,7 @@ fn main() {
             read_document,
             write_document,
             read_relative_image,
+            resolve_markdown_link,
             startup_paths,
         ])
         .run(tauri::generate_context!())

@@ -12,10 +12,27 @@
       <header class="toolbar" aria-label="主工具栏">
         <div class="toolbar-group file-actions">
           <button id="open-file" class="button" title="打开 Markdown 文件（Ctrl+O）">打开文件</button>
-          <button id="open-folder" class="button" title="打开文件夹（Ctrl+Shift+O）">打开文件夹</button>
+          <button id="open-folder" class="button" title="选择其中任意 Markdown，自动打开整个文件夹（Ctrl+Shift+O）">打开文件夹</button>
           <span class="toolbar-separator" aria-hidden="true"></span>
           <button id="save-file" class="icon-button" title="保存（Ctrl+S）" aria-label="保存">保存</button>
           <button id="save-as" class="button quiet" title="另存为（Ctrl+Shift+S）">另存为</button>
+          <div class="copy-menu-wrap">
+            <button id="copy-menu-toggle" class="button quiet copy-menu-toggle" type="button" aria-haspopup="menu" aria-expanded="false" title="复制当前文档">复制⌄</button>
+            <div id="copy-menu" class="copy-menu" role="menu" hidden>
+              <button type="button" role="menuitem" data-copy-mode="markdown">
+                <strong>Markdown 原文</strong>
+                <span>保留 #、[]、Callout 等语法</span>
+              </button>
+              <button type="button" role="menuitem" data-copy-mode="plain">
+                <strong>纯文本</strong>
+                <span>去掉 Markdown 符号，只复制文字</span>
+              </button>
+              <button type="button" role="menuitem" data-copy-mode="rich">
+                <strong>富文本</strong>
+                <span>粘贴到 Word 时保留标题、列表和表格</span>
+              </button>
+            </div>
+          </div>
         </div>
 
         <div class="document-navigation" aria-label="文档导航">
@@ -31,6 +48,7 @@
             <button data-mode="split" class="mode-button" aria-pressed="false">分栏</button>
           </div>
           <button id="theme-toggle" class="button quiet" title="主题：跟随系统">系统主题</button>
+          <button id="fullscreen-toggle" class="button quiet" title="进入全屏幕（F11）" aria-label="进入全屏幕">全屏</button>
           <button id="syntax-help" class="button quiet" title="Markdown 语法速查（Ctrl+/）">语法</button>
         </div>
       </header>
@@ -67,6 +85,15 @@
             <span id="document-path" class="document-path">离线 Markdown 阅读与编辑器</span>
           </div>
 
+          <div id="document-find" class="document-find" role="search" hidden>
+            <label for="find-input">查找文档</label>
+            <input id="find-input" type="search" placeholder="输入要查找的文字" autocomplete="off" />
+            <output id="find-count" aria-live="polite">0 / 0</output>
+            <button id="find-previous" class="find-button" type="button" title="上一个（Shift+Enter）" aria-label="上一个匹配">↑</button>
+            <button id="find-next" class="find-button" type="button" title="下一个（Enter）" aria-label="下一个匹配">↓</button>
+            <button id="find-close" class="find-button" type="button" title="关闭（Esc）" aria-label="关闭查找">×</button>
+          </div>
+
           <div id="content-panes" class="content-panes reading-mode">
             <div id="editor-pane" class="pane editor-pane" aria-label="Markdown 编辑器">
               <div class="formatting-toolbar" role="toolbar" aria-label="文字标记工具">
@@ -80,9 +107,19 @@
                   <span>红色笔</span>
                 </button>
                 <span id="formatting-hint" class="formatting-hint" aria-live="polite">先选中文字再点按钮，或先开启画笔再拖选</span>
+                <div class="sync-controls" aria-label="编辑与预览滚动同步">
+                  <label for="sync-mode">同步</label>
+                  <select id="sync-mode" title="选择编辑区与预览区的滚动关系" disabled>
+                    <option value="auto">自动锚点</option>
+                    <option value="manual">手动校准</option>
+                    <option value="off">关闭</option>
+                  </select>
+                  <button id="reset-sync" class="sync-reset" type="button" title="清除手动位置差并按内容重新对齐" disabled>重新对齐</button>
+                </div>
                 <button id="pane-swap" class="pane-swap" type="button" aria-pressed="false" title="把编辑区移到右侧">⇄ 换边</button>
               </div>
               <textarea id="editor" spellcheck="false" aria-label="Markdown 编辑器" placeholder="在这里输入 Markdown…"></textarea>
+              <div id="html-completion" class="html-completion" role="listbox" aria-label="安全格式候选" hidden></div>
             </div>
             <div id="split-resizer" class="pane-resizer split-resizer" role="separator" tabindex="0" aria-label="调整编辑区与预览区宽度" aria-orientation="vertical" aria-valuemin="25" aria-valuemax="75" aria-valuenow="44"></div>
             <div id="preview-pane" class="pane preview-pane" aria-label="Markdown 预览">
@@ -108,24 +145,33 @@
           </div>
           <button class="icon-button" value="close" aria-label="关闭语法速查">×</button>
         </header>
-        <label class="syntax-search">
-          <span>筛选语法</span>
-          <input id="syntax-search" type="search" placeholder="例如：表格、Callout、图片" autocomplete="off" />
-        </label>
+        <p class="syntax-intro">点击卡片里的按钮复制可直接修改的格式；复制后替换示例文字即可。</p>
         <div id="syntax-grid" class="syntax-grid">
-          <article data-search="标题 heading"><h3>标题</h3><code># 一级标题<br>## 二级标题<br>### 三级标题</code></article>
-          <article data-search="粗体 斜体 删除线 text"><h3>文字</h3><code>**粗体**<br>*斜体*<br>~~删除线~~</code></article>
-          <article data-search="黄色 高光 高亮 highlight mark 背景"><h3>黄色高光</h3><code>&lt;mark&gt;需要高光的文字&lt;/mark&gt;</code></article>
-          <article data-search="红色 文字 红笔 red color"><h3>红色文字</h3><code>&lt;span class=&quot;text-red&quot;&gt;红色文字&lt;/span&gt;</code></article>
-          <article data-search="段落 空行 换行 回车 段首 缩进 空格 paragraph line break indent"><h3>段落与换行</h3><code>第一段文字<br><br>第二段文字<br><br>行尾两个空格  <br>只换行，不分段<br><br>　　中文段首用两个全角空格</code><p class="syntax-note">行首 4 个半角空格会变成代码块，不是首行缩进。</p></article>
-          <article data-search="列表 list"><h3>列表</h3><code>- 无序列表<br>1. 有序列表</code></article>
-          <article data-search="任务 列表 task checkbox"><h3>任务列表</h3><code>- [ ] 待完成<br>- [x] 已完成</code></article>
-          <article data-search="引用 quote"><h3>引用</h3><code>&gt; 引用内容</code></article>
-          <article data-search="链接 link"><h3>链接</h3><code>[显示文字](https://example.com)</code></article>
-          <article data-search="图片 image relative"><h3>图片</h3><code>![图片说明](images/photo.png)</code></article>
-          <article data-search="代码块 code fence"><h3>代码块</h3><code>```js<br>console.log('Hello')<br>```</code></article>
-          <article data-search="表格 table"><h3>表格</h3><code>| 名称 | 数值 |<br>| --- | ---: |<br>| 示例 | 100 |</code></article>
-          <article class="syntax-wide callout-reference" data-search="Callout Obsidian 提示 折叠 嵌套 note abstract summary tldr info todo tip hint important success check done question help faq warning caution attention failure fail missing danger error bug example quote cite">
+          <article data-syntax="heading"><h3>标题</h3><code># 一级标题<br>## 二级标题<br>### 三级标题</code></article>
+          <article data-syntax="text"><h3>文字</h3><code>**粗体**<br>*斜体*<br>~~删除线~~</code></article>
+          <article data-syntax="highlight"><h3>黄色高光</h3><code>&lt;mark&gt;需要高光的文字&lt;/mark&gt;</code></article>
+          <article data-syntax="red"><h3>红色文字</h3><code>&lt;span class=&quot;text-red&quot;&gt;红色文字&lt;/span&gt;</code></article>
+          <article class="syntax-wide" data-syntax="paragraph">
+            <h3>段首空格与空白行</h3>
+            <div class="paragraph-cases">
+              <section class="paragraph-case"><h4>1. HTML 段首空两格</h4><code>&amp;emsp;&amp;emsp;</code><p>可直接选中复制；预览时会变成两个较宽的空格。</p></section>
+              <section class="paragraph-case"><h4>2. 中文全角空格</h4><code class="visible-spaces">［<span>　　</span>］</code><p>方括号中是两个真正的全角空格，不依赖 HTML 实体。</p></section>
+              <section class="paragraph-case"><h4>3. 只换下一行</h4><code>&lt;br&gt;</code><p>需要强制换到下一行时使用。</p></section>
+              <section class="paragraph-case"><h4>4. 空出一整行</h4><code>&lt;br&gt;&lt;br&gt;</code><p>需要明显留白时使用；连续按很多次 Enter 不会越空越宽。</p></section>
+            </div>
+            <p class="syntax-note">这些是 Markdown 中常用的内嵌 HTML；其他平台是否支持，取决于该平台的渲染规则。</p>
+          </article>
+          <article data-syntax="list"><h3>列表</h3><code>- 无序列表<br>1. 有序列表<br>&nbsp;&nbsp;- 嵌套项目</code></article>
+          <article data-syntax="task"><h3>任务列表</h3><code>- [ ] 待完成<br>- [x] 已完成</code></article>
+          <article data-syntax="quote"><h3>引用</h3><code>&gt; 引用内容</code></article>
+          <article data-syntax="link"><h3>链接与自动链接</h3><code>[显示文字](https://example.com)<br>&lt;https://example.com&gt;</code></article>
+          <article data-syntax="image"><h3>图片</h3><code>![图片说明](images/photo.png)</code></article>
+          <article data-syntax="obsidian-image"><h3>Obsidian 图片</h3><code>![[asset/图片.png]]<br>![[asset/图片.png|480]]</code><p class="syntax-note">竖线后的数字是显示宽度；支持中文、空格和子文件夹路径。</p></article>
+          <article data-syntax="inline-code"><h3>行内代码</h3><code>使用 `代码` 标记命令或变量</code></article>
+          <article data-syntax="code-block"><h3>代码块</h3><code>```js<br>console.log('Hello')<br>```</code></article>
+          <article data-syntax="table"><h3>表格</h3><code>| 名称 | 数值 |<br>| --- | ---: |<br>| 示例 | 100 |</code></article>
+          <article data-syntax="divider"><h3>分隔线与转义</h3><code>---<br><br>\*显示星号，不作为斜体*</code></article>
+          <article class="syntax-wide callout-reference" data-syntax="callout">
             <h3>Callout（Obsidian）</h3>
             <p class="syntax-description">支持自定义标题、默认展开或收起、多层嵌套，以及 Obsidian 官方内置类型和别名。</p>
             <div class="syntax-reference-grid">
@@ -143,10 +189,9 @@
               </section>
             </div>
           </article>
-          <article data-search="Wiki Link Obsidian 双链"><h3>Wiki Link</h3><code>[[文档名称]]<br>[[文档名称|显示文字]]</code></article>
-          <article data-search="Frontmatter YAML 属性"><h3>Frontmatter</h3><code>---<br>title: 文档标题<br>tags: [示例]<br>---</code></article>
+          <article data-syntax="wiki"><h3>Wiki Link</h3><code>[[文档名称]]<br>[[文档名称|显示文字]]</code></article>
+          <article data-syntax="frontmatter"><h3>Frontmatter</h3><code>---<br>title: 文档标题<br>tags: [示例]<br>---</code></article>
         </div>
-        <p id="syntax-no-results" class="syntax-no-results" hidden>没有匹配的语法。</p>
       </form>
     </dialog>
 
