@@ -11,7 +11,9 @@
 | 系统 | 下载 | 适用范围 |
 | --- | --- | --- |
 | Windows | [下载 Windows x64 安装版](https://github.com/willieweigz/lightmark/releases/latest/download/LightMark_Windows_x64_Setup.exe) | Windows 11 64 位 |
-| macOS | [下载 macOS 通用版](https://github.com/willieweigz/lightmark/releases/latest/download/LightMark_macOS_Universal.zip) | macOS 13 及以上，Apple 芯片与 Intel 芯片 |
+| macOS | [下载 macOS 0.5.1 通用版](https://github.com/willieweigz/lightmark/releases/download/v0.5.1/LightMark_macOS_Universal.zip) | macOS 13 及以上，Apple 芯片与 Intel 芯片 |
+
+Windows 与 macOS 版本独立更新。表格会分别指向两个平台当前已经真实构建和验收的安装包；Windows 发布新功能不会把尚未在 Mac 上移植的功能标成 macOS 新版本。
 
 ### Windows 安装
 
@@ -49,6 +51,7 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 - 编辑时输入 `<` 会出现受控的安全候选，可插入 `<br>`、`<br><br>`、黄色高光和红色文字格式
 - Windows 提供 Markdown 原文、纯文本和富文本三种整篇复制；富文本可粘贴到 Word 等应用并保留排版
 - Windows 支持工具栏或 F11 进入全屏幕，并用 Ctrl+F 查找当前文档文字
+- Windows 提供可收起、可调宽度的 Codex 助读侧栏，可针对整篇文章或选中文字连续提问；回答方式可选“只依据原文 / 自然回答 / 联网查证”
 - 打开单个 `.md` / `.markdown`，或打开整个文件夹
 - 自动列出同文件夹第一层 Markdown，按文件名自然排序
 - 左侧可切换“文档 / 本文目录”；目录按标题层级缩进，点击即可在阅读或编辑位置跳转
@@ -91,6 +94,16 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 - 禁止 Markdown 中的脚本和事件处理器执行
 - 远程图片默认阻止；相对路径图片由应用从本地读取
 - 外部链接交给系统默认浏览器打开
+
+### Windows Codex 助读（可选）
+
+Codex 助读是可选联网功能，不影响 Markdown 阅读、编辑、预览等离线能力。使用前需要在电脑上安装 [Codex CLI](https://developers.openai.com/codex/cli/) 并登录 ChatGPT 账户；轻阅不保存 OpenAI API Key，也不会把登录凭据写入文档。
+
+- “只依据原文”只根据发送的文章或选中文字回答，资料没有写明时会直接说明。
+- “自然回答”可以补充模型已有常识，并把补充内容明确标注出来。
+- “联网查证”会使用 Codex 网页搜索，并在回答中列出关键来源网址。
+- 只有当前选择的整篇文章或选中文字会作为资料发送；Markdown 中的指令视为不受信任内容。
+- 助读会阻止命令执行、任意本地文件读取与写入、MCP、动态工具及其他高风险操作；联网查证模式只额外开放网页搜索。
 
 ## 代码签名政策
 

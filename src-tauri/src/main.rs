@@ -9,6 +9,8 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 
+mod codex;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DocumentEntry {
@@ -184,6 +186,7 @@ fn startup_paths() -> Vec<String> {
 
 fn main() {
     tauri::Builder::default()
+        .manage(codex::CodexBridge::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
@@ -201,6 +204,11 @@ fn main() {
             read_relative_image,
             resolve_markdown_link,
             startup_paths,
+            codex::codex_status,
+            codex::codex_connect,
+            codex::codex_ask,
+            codex::codex_interrupt,
+            codex::codex_new_conversation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LightMark");

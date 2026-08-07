@@ -1897,12 +1897,13 @@ dependencies = [
 
 [[package]]
 name = "lightmark"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "base64 0.22.1",
  "mime_guess",
  "percent-encoding",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
