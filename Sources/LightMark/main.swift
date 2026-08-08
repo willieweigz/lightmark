@@ -1,5 +1,27 @@
 import AppKit
+import UniformTypeIdentifiers
 import WebKit
+
+private let markdownExtensions: Set<String> = ["md", "markdown"]
+private let directlyReadableTextExtensions: Set<String> = ["md", "markdown", "txt"]
+private let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
+
+private func isMarkdownURL(_ url: URL) -> Bool {
+    markdownExtensions.contains(url.pathExtension.lowercased())
+}
+
+private func isImageURL(_ url: URL) -> Bool {
+    imageExtensions.contains(url.pathExtension.lowercased())
+}
+
+private func isSupportedContentURL(_ url: URL) -> Bool {
+    directlyReadableTextExtensions.contains(url.pathExtension.lowercased()) || isImageURL(url)
+}
+
+private enum ContentKind {
+    case markdown
+    case image
+}
 
 private enum ViewMode: Int {
     case reading = 0
@@ -8,8 +30,15 @@ private enum ViewMode: Int {
 }
 
 private enum SidebarMode: Int {
-    case documents = 0
-    case outline = 1
+    case images = 0
+    case documents = 1
+    case outline = 2
+}
+
+private enum ImageZoomMode: String {
+    case fit
+    case actual
+    case custom
 }
 
 private struct DocumentHeading {
@@ -41,6 +70,102 @@ private enum InlineFormatTool: Equatable {
         case .highlight: return "黄色高光笔"
         case .redText: return "红色笔"
         }
+    }
+}
+
+private final class ImageCanvasView: NSView {
+    let imageView = NSImageView()
+    weak var hostingScrollView: NSScrollView?
+    private var dragStartLocation: NSPoint?
+    private var dragStartOrigin: NSPoint?
+    private var cursorPushed = false
+    private(set) var naturalSize = NSSize.zero
+    private(set) var scale: CGFloat = 1
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        imageView.imageAlignment = .alignCenter
+        imageView.imageScaling = .scaleAxesIndependently
+        imageView.animates = true
+        imageView.isEditable = false
+        addSubview(imageView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func setImage(_ image: NSImage?, naturalSize: NSSize = .zero) {
+        imageView.image = image
+        self.naturalSize = naturalSize
+        needsLayout = true
+        window?.invalidateCursorRects(for: self)
+    }
+
+    func updateScale(_ scale: CGFloat, viewportSize: NSSize) {
+        self.scale = scale
+        let imageWidth = max(1, naturalSize.width * scale)
+        let imageHeight = max(1, naturalSize.height * scale)
+        let canvasWidth = max(viewportSize.width, imageWidth + 48)
+        let canvasHeight = max(viewportSize.height, imageHeight + 48)
+        frame = NSRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight)
+        imageView.frame = NSRect(
+            x: max(24, (canvasWidth - imageWidth) / 2),
+            y: max(24, (canvasHeight - imageHeight) / 2),
+            width: imageWidth,
+            height: imageHeight
+        )
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let scrollView = hostingScrollView else { return }
+        dragStartLocation = event.locationInWindow
+        dragStartOrigin = scrollView.contentView.bounds.origin
+        NSCursor.closedHand.push()
+        cursorPushed = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let scrollView = hostingScrollView,
+              let dragStartLocation,
+              let dragStartOrigin else { return }
+        let deltaX = event.locationInWindow.x - dragStartLocation.x
+        let deltaY = event.locationInWindow.y - dragStartLocation.y
+        let proposed = NSRect(
+            x: dragStartOrigin.x - deltaX,
+            y: dragStartOrigin.y + deltaY,
+            width: scrollView.contentView.bounds.width,
+            height: scrollView.contentView.bounds.height
+        )
+        let constrained = scrollView.contentView.constrainBoundsRect(proposed)
+        scrollView.contentView.scroll(to: constrained.origin)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragStartLocation = nil
+        dragStartOrigin = nil
+        if cursorPushed {
+            NSCursor.pop()
+            cursorPushed = false
+        }
+    }
+}
+
+private final class ImageScrollView: NSScrollView {
+    var onZoomStep: ((CGFloat) -> Void)?
+
+    override func scrollWheel(with event: NSEvent) {
+        guard abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX), event.scrollingDeltaY != 0 else {
+            super.scrollWheel(with: event)
+            return
+        }
+        onZoomStep?(event.scrollingDeltaY < 0 ? 1.12 : 1 / 1.12)
     }
 }
 
@@ -88,9 +213,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openDocument(_ sender: Any?) {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "md")!, .init(filenameExtension: "markdown")!, .plainText]
+        panel.title = "打开 Markdown 或图片"
+        panel.allowedContentTypes = (["md", "markdown", "png", "jpg", "jpeg", "webp", "gif", "bmp"]
+            .compactMap { UTType(filenameExtension: $0) }) + [.plainText]
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
+        panel.directoryURL = currentDocument?.fileURL?.deletingLastPathComponent()
         guard panel.runModal() == .OK else { return }
         panel.urls.forEach { showDocument(url: $0) }
     }
@@ -101,20 +229,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "打开文件夹"
+        panel.directoryURL = currentDocument?.fileURL?.deletingLastPathComponent()
         guard panel.runModal() == .OK, let directory = panel.url else { return }
         let files = ((try? FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
         )) ?? []).filter {
-            ["md", "markdown"].contains($0.pathExtension.lowercased())
+            (isMarkdownURL($0) || isImageURL($0))
+                && ((try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false)
         }.sorted {
             $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
         }
         guard let first = files.first else {
             let alert = NSAlert()
-            alert.messageText = "这个文件夹里没有 Markdown 文档"
-            alert.informativeText = "请选择包含 .md 或 .markdown 文件的文件夹。"
+            alert.messageText = "这个文件夹里没有可阅读文件"
+            alert.informativeText = "请选择第一层包含 Markdown、PNG、JPG、WebP、GIF 或 BMP 的文件夹。"
             alert.runModal()
             return
         }
@@ -466,8 +596,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private var renderWorkItem: DispatchWorkItem?
     private var webReady = false
     private var fontScale = 1.0
+    private var currentContentKind = ContentKind.markdown
     private var currentMode = ViewMode.reading
-    private var siblingURLs: [URL] = []
+    private var documentURLs: [URL] = []
+    private var imageURLs: [URL] = []
     private var documentHeadings: [DocumentHeading] = []
     private var sidebarMode = SidebarMode.documents
     private var sidebarVisible = false
@@ -486,6 +618,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private var sidebarWidth: CGFloat = {
         let stored = UserDefaults.standard.double(forKey: "LightMarkSidebarWidth")
         return stored >= 170 && stored <= 310 ? CGFloat(stored) : 220
+    }()
+    private var imageZoomMode: ImageZoomMode = {
+        guard let raw = UserDefaults.standard.string(forKey: "LightMarkImageZoomMode"),
+              let mode = ImageZoomMode(rawValue: raw) else { return .fit }
+        return mode
+    }()
+    private var imageScale: CGFloat = {
+        let stored = UserDefaults.standard.double(forKey: "LightMarkImageZoomScale")
+        return stored >= 0.05 && stored <= 8 ? CGFloat(stored) : 1
     }()
 
     private let sidebarToggleButton = NSButton(title: "☰", target: nil, action: nil)
@@ -507,9 +648,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let editorScroll = NSScrollView()
     private let webView: WKWebView
     private let splitView = NSSplitView()
+    private let contentHost = NSView()
+    private let imageViewer = NSView()
+    private let imageToolbar = NSVisualEffectView()
+    private let imageZoomOutButton = NSButton(title: "−", target: nil, action: nil)
+    private let imageZoomLabel = NSTextField(labelWithString: "适合")
+    private let imageZoomInButton = NSButton(title: "+", target: nil, action: nil)
+    private let imageFitButton = NSButton(title: "适合窗口", target: nil, action: nil)
+    private let imageActualButton = NSButton(title: "原始大小", target: nil, action: nil)
+    private let imageGestureHint = NSTextField(labelWithString: "滚轮缩放 · 拖动查看大图")
+    private let imageDetailsLabel = NSTextField(labelWithString: "")
+    private let imageScroll = ImageScrollView()
+    private let imageCanvas = ImageCanvasView()
     private let documentAreaSplitView = NSSplitView()
     private let sidebarContainer = NSVisualEffectView()
-    private let sidebarModeControl = NSSegmentedControl(labels: ["文档", "本文目录"], trackingMode: .selectOne, target: nil, action: nil)
+    private let sidebarModeControl = NSSegmentedControl(labels: ["图片", "文档", "本文目录"], trackingMode: .selectOne, target: nil, action: nil)
     private let sidebarScroll = NSScrollView()
     private let sidebarTable = NSTableView()
 
@@ -541,7 +694,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
-    private var hasUnsavedChanges: Bool { editor.string != lastSavedText }
+    private var hasUnsavedChanges: Bool {
+        currentContentKind == .markdown && editor.string != lastSavedText
+    }
     private static let outlineFenceRegex = try! NSRegularExpression(pattern: #"^ {0,3}(`{3,}|~{3,})"#)
     private static let outlineHeadingRegex = try! NSRegularExpression(pattern: #"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$"#)
     private static let outlineSetextRegex = try! NSRegularExpression(pattern: #"^ {0,3}(=+|-+)[ \t]*$"#)
@@ -684,7 +839,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         ])
 
         documentAreaSplitView.addArrangedSubview(sidebarContainer)
-        documentAreaSplitView.addArrangedSubview(splitView)
+        documentAreaSplitView.addArrangedSubview(contentHost)
 
         editorContainer.translatesAutoresizingMaskIntoConstraints = false
         formattingBar.material = .contentBackground
@@ -770,6 +925,76 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         webView.navigationDelegate = self
         webView.setValue(false, forKey: "drawsBackground")
+        splitView.translatesAutoresizingMaskIntoConstraints = false
+        contentHost.addSubview(splitView)
+
+        imageViewer.translatesAutoresizingMaskIntoConstraints = false
+        imageViewer.isHidden = true
+        contentHost.addSubview(imageViewer)
+
+        imageToolbar.material = .contentBackground
+        imageToolbar.blendingMode = .withinWindow
+        imageToolbar.state = .active
+        imageToolbar.translatesAutoresizingMaskIntoConstraints = false
+        imageViewer.addSubview(imageToolbar)
+
+        for button in [imageZoomOutButton, imageZoomInButton, imageFitButton, imageActualButton] {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.font = .systemFont(ofSize: 11.5, weight: .medium)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            imageToolbar.addSubview(button)
+        }
+        imageZoomOutButton.target = self
+        imageZoomOutButton.action = #selector(zoomImageOut(_:))
+        imageZoomOutButton.toolTip = "缩小图片（⌘− 或滚轮向下）"
+        imageZoomOutButton.setAccessibilityLabel("缩小图片")
+        imageZoomInButton.target = self
+        imageZoomInButton.action = #selector(zoomImageIn(_:))
+        imageZoomInButton.toolTip = "放大图片（⌘+ 或滚轮向上）"
+        imageZoomInButton.setAccessibilityLabel("放大图片")
+        imageFitButton.target = self
+        imageFitButton.action = #selector(fitImageToWindow(_:))
+        imageFitButton.setButtonType(.toggle)
+        imageFitButton.toolTip = "让整张图片适合当前窗口"
+        imageFitButton.setAccessibilityLabel("适合窗口")
+        imageActualButton.target = self
+        imageActualButton.action = #selector(showImageAtActualSize(_:))
+        imageActualButton.setButtonType(.toggle)
+        imageActualButton.toolTip = "以图片原始像素尺寸显示"
+        imageActualButton.setAccessibilityLabel("原始大小")
+
+        imageZoomLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        imageZoomLabel.alignment = .center
+        imageZoomLabel.translatesAutoresizingMaskIntoConstraints = false
+        imageZoomLabel.setAccessibilityLabel("图片缩放比例")
+        imageToolbar.addSubview(imageZoomLabel)
+
+        imageGestureHint.font = .systemFont(ofSize: 10.5)
+        imageGestureHint.textColor = .secondaryLabelColor
+        imageGestureHint.lineBreakMode = .byTruncatingTail
+        imageGestureHint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        imageGestureHint.translatesAutoresizingMaskIntoConstraints = false
+        imageToolbar.addSubview(imageGestureHint)
+
+        imageDetailsLabel.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        imageDetailsLabel.textColor = .secondaryLabelColor
+        imageDetailsLabel.alignment = .right
+        imageDetailsLabel.lineBreakMode = .byTruncatingHead
+        imageDetailsLabel.translatesAutoresizingMaskIntoConstraints = false
+        imageToolbar.addSubview(imageDetailsLabel)
+
+        imageScroll.hasHorizontalScroller = true
+        imageScroll.hasVerticalScroller = true
+        imageScroll.autohidesScrollers = true
+        imageScroll.drawsBackground = true
+        imageScroll.backgroundColor = .textBackgroundColor
+        imageScroll.translatesAutoresizingMaskIntoConstraints = false
+        imageScroll.documentView = imageCanvas
+        imageScroll.onZoomStep = { [weak self] factor in self?.zoomImage(by: factor) }
+        imageCanvas.hostingScrollView = imageScroll
+        imageViewer.addSubview(imageScroll)
+
         splitView.addArrangedSubview(editorContainer)
         splitView.addArrangedSubview(webView)
         applyPaneOrder()
@@ -833,6 +1058,41 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             editorScroll.trailingAnchor.constraint(equalTo: editorContainer.trailingAnchor),
             editorScroll.topAnchor.constraint(equalTo: formattingBar.bottomAnchor),
             editorScroll.bottomAnchor.constraint(equalTo: editorContainer.bottomAnchor),
+            splitView.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
+            splitView.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor),
+            splitView.topAnchor.constraint(equalTo: contentHost.topAnchor),
+            splitView.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor),
+            imageViewer.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
+            imageViewer.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor),
+            imageViewer.topAnchor.constraint(equalTo: contentHost.topAnchor),
+            imageViewer.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor),
+            imageToolbar.leadingAnchor.constraint(equalTo: imageViewer.leadingAnchor),
+            imageToolbar.trailingAnchor.constraint(equalTo: imageViewer.trailingAnchor),
+            imageToolbar.topAnchor.constraint(equalTo: imageViewer.topAnchor),
+            imageToolbar.heightAnchor.constraint(equalToConstant: 44),
+            imageZoomOutButton.leadingAnchor.constraint(equalTo: imageToolbar.leadingAnchor, constant: 12),
+            imageZoomOutButton.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageZoomOutButton.widthAnchor.constraint(equalToConstant: 32),
+            imageZoomLabel.leadingAnchor.constraint(equalTo: imageZoomOutButton.trailingAnchor, constant: 4),
+            imageZoomLabel.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageZoomLabel.widthAnchor.constraint(equalToConstant: 72),
+            imageZoomInButton.leadingAnchor.constraint(equalTo: imageZoomLabel.trailingAnchor, constant: 4),
+            imageZoomInButton.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageZoomInButton.widthAnchor.constraint(equalToConstant: 32),
+            imageFitButton.leadingAnchor.constraint(equalTo: imageZoomInButton.trailingAnchor, constant: 10),
+            imageFitButton.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageActualButton.leadingAnchor.constraint(equalTo: imageFitButton.trailingAnchor, constant: 6),
+            imageActualButton.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageGestureHint.leadingAnchor.constraint(equalTo: imageActualButton.trailingAnchor, constant: 12),
+            imageGestureHint.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageGestureHint.trailingAnchor.constraint(lessThanOrEqualTo: imageDetailsLabel.leadingAnchor, constant: -8),
+            imageDetailsLabel.trailingAnchor.constraint(equalTo: imageToolbar.trailingAnchor, constant: -14),
+            imageDetailsLabel.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageDetailsLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 250),
+            imageScroll.leadingAnchor.constraint(equalTo: imageViewer.leadingAnchor),
+            imageScroll.trailingAnchor.constraint(equalTo: imageViewer.trailingAnchor),
+            imageScroll.topAnchor.constraint(equalTo: imageToolbar.bottomAnchor),
+            imageScroll.bottomAnchor.constraint(equalTo: imageViewer.bottomAnchor),
             documentAreaSplitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             documentAreaSplitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             documentAreaSplitView.topAnchor.constraint(equalTo: topBar.bottomAnchor),
@@ -846,6 +1106,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     private func load(_ url: URL?) {
+        if let url, isImageURL(url) {
+            loadImage(url)
+            return
+        }
+
         let text: String
         if let url {
             do {
@@ -859,19 +1124,101 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             text = "# 欢迎使用轻阅 Markdown\n\n把 `.md` 文件拖到窗口，或按 **⌘O** 打开。\n\n> [!note] Obsidian Callout\n> Note、Tip、Warning 等 Callout 会按卡片正常显示。\n\n切换到「编辑」或「分栏」即可修改内容，按 **⌘S** 保存。"
             statusLabel.stringValue = "拖入文件即可阅读"
         }
+        currentContentKind = .markdown
         editor.string = text
+        imageCanvas.setImage(nil)
         refreshDocumentOutline()
         setActiveFormatTool(nil)
         lastSavedText = text
+        applyContentKind(.markdown)
         updateTitle()
         refreshSiblingDocuments()
         loadPreviewShell()
     }
 
-    private func replaceDocument(with url: URL) {
-        guard ["md", "markdown", "txt"].contains(url.pathExtension.lowercased()) else {
+    private func loadImage(_ url: URL) {
+        guard let image = NSImage(contentsOf: url) else {
             NSSound.beep()
-            statusLabel.stringValue = "仅支持 Markdown 文本"
+            statusLabel.stringValue = "图片打开失败"
+            let alert = NSAlert()
+            alert.messageText = "无法显示这张图片"
+            alert.informativeText = "系统无法解码 \(url.lastPathComponent)。"
+            alert.runModal()
+            return
+        }
+
+        currentContentKind = .image
+        editor.string = ""
+        lastSavedText = ""
+        documentHeadings = []
+        setActiveFormatTool(nil)
+        let naturalSize = imagePixelSize(image)
+        imageCanvas.setImage(image, naturalSize: naturalSize)
+        applyContentKind(.image)
+        updateTitle()
+        refreshSiblingDocuments()
+        updateImageDetails(url: url, naturalSize: naturalSize)
+        statusLabel.stringValue = "已打开图片"
+        DispatchQueue.main.async { [weak self] in
+            self?.applyImageZoomPreference(alignTop: true)
+            self?.window?.makeFirstResponder(self?.imageScroll)
+        }
+    }
+
+    private func imagePixelSize(_ image: NSImage) -> NSSize {
+        let representation = image.representations.max {
+            $0.pixelsWide * $0.pixelsHigh < $1.pixelsWide * $1.pixelsHigh
+        }
+        if let representation, representation.pixelsWide > 0, representation.pixelsHigh > 0 {
+            return NSSize(width: representation.pixelsWide, height: representation.pixelsHigh)
+        }
+        return image.size
+    }
+
+    private func updateImageDetails(url: URL, naturalSize: NSSize) {
+        let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let sizeText: String
+        if bytes < 1024 {
+            sizeText = "\(bytes) B"
+        } else if bytes < 1024 * 1024 {
+            sizeText = String(format: bytes < 10 * 1024 ? "%.1f KB" : "%.0f KB", Double(bytes) / 1024)
+        } else {
+            sizeText = String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
+        }
+        let type = url.pathExtension.lowercased() == "jpeg" ? "JPG" : url.pathExtension.uppercased()
+        imageDetailsLabel.stringValue = "\(Int(naturalSize.width)) × \(Int(naturalSize.height)) · \(sizeText) · \(type)"
+    }
+
+    private func applyContentKind(_ kind: ContentKind) {
+        currentContentKind = kind
+        let imageMode = kind == .image
+        splitView.isHidden = imageMode
+        imageViewer.isHidden = !imageMode
+        modeControl.isEnabled = !imageMode
+        syntaxButton.isEnabled = !imageMode
+        copyButton.isEnabled = !imageMode
+        sidebarModeControl.setEnabled(!imageMode, forSegment: SidebarMode.outline.rawValue)
+        previousButton.toolTip = imageMode ? "上一张（按 ←）" : "上一篇（阅读模式按 ←）"
+        previousButton.setAccessibilityLabel(imageMode ? "上一张" : "上一篇")
+        nextButton.toolTip = imageMode ? "下一张（按 →）" : "下一篇（阅读模式按 →）"
+        nextButton.setAccessibilityLabel(imageMode ? "下一张" : "下一篇")
+
+        if imageMode {
+            sidebarMode = .images
+        } else if sidebarMode == .images {
+            sidebarMode = .documents
+        }
+        sidebarModeControl.selectedSegment = sidebarMode.rawValue
+        isUpdatingSidebarSelection = true
+        sidebarTable.reloadData()
+        sidebarTable.deselectAll(nil)
+        DispatchQueue.main.async { [weak self] in self?.isUpdatingSidebarSelection = false }
+    }
+
+    private func replaceDocument(with url: URL) {
+        guard isSupportedContentURL(url) else {
+            NSSound.beep()
+            statusLabel.stringValue = "不支持这种文件"
             return
         }
         guard confirmLeavingCurrentDocument() else { return }
@@ -881,7 +1228,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     private func refreshSiblingDocuments() {
         guard let fileURL else {
-            siblingURLs = []
+            documentURLs = []
+            imageURLs = []
             updateNavigationControls()
             return
         }
@@ -891,24 +1239,33 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
         )) ?? []
-        siblingURLs = urls.filter { url in
-            let ext = url.pathExtension.lowercased()
-            guard ext == "md" || ext == "markdown" else { return false }
+        let regularFiles = urls.filter { url in
             return (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
         }.sorted {
             $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
         }
+        documentURLs = regularFiles.filter(isMarkdownURL)
+        imageURLs = regularFiles.filter(isImageURL)
         if !didChooseInitialSidebarVisibility {
-            sidebarVisible = siblingURLs.count > 1
+            sidebarVisible = documentURLs.count + imageURLs.count > 1
             didChooseInitialSidebarVisibility = true
             applySidebarVisibility()
         }
         updateNavigationControls()
     }
 
+    private var currentNavigationURLs: [URL] {
+        currentContentKind == .image ? imageURLs : documentURLs
+    }
+
     private var currentSiblingIndex: Int? {
         guard let current = fileURL?.standardizedFileURL else { return nil }
-        return siblingURLs.firstIndex { $0.standardizedFileURL == current }
+        return currentNavigationURLs.firstIndex { $0.standardizedFileURL == current }
+    }
+
+    private var sidebarMatchesCurrentContent: Bool {
+        (currentContentKind == .image && sidebarMode == .images)
+            || (currentContentKind == .markdown && sidebarMode == .documents)
     }
 
     private func updateNavigationControls() {
@@ -916,7 +1273,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             previousButton.isEnabled = false
             nextButton.isEnabled = false
             positionLabel.stringValue = ""
-            if sidebarMode == .documents {
+            if sidebarMatchesCurrentContent {
                 isUpdatingSidebarSelection = true
                 sidebarTable.reloadData()
                 sidebarTable.deselectAll(nil)
@@ -925,9 +1282,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             return
         }
         previousButton.isEnabled = index > 0
-        nextButton.isEnabled = index + 1 < siblingURLs.count
-        positionLabel.stringValue = "\(index + 1) / \(siblingURLs.count)"
-        if sidebarMode == .documents {
+        nextButton.isEnabled = index + 1 < currentNavigationURLs.count
+        positionLabel.stringValue = "\(index + 1) / \(currentNavigationURLs.count)"
+        if sidebarMatchesCurrentContent {
             isUpdatingSidebarSelection = true
             sidebarTable.reloadData()
             sidebarTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
@@ -943,14 +1300,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         refreshSiblingDocuments()
         guard let index = currentSiblingIndex else { NSSound.beep(); return }
         let destination = index + offset
-        guard siblingURLs.indices.contains(destination) else { NSSound.beep(); return }
+        guard currentNavigationURLs.indices.contains(destination) else { NSSound.beep(); return }
         navigateDocument(to: destination)
     }
 
     private func navigateDocument(to destination: Int) {
-        guard siblingURLs.indices.contains(destination) else { return }
+        let urls = currentNavigationURLs
+        guard urls.indices.contains(destination) else { return }
         guard confirmLeavingCurrentDocument() else { return }
-        fileURL = siblingURLs[destination]
+        fileURL = urls[destination]
         load(fileURL)
     }
 
@@ -1089,11 +1447,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     @objc private func sidebarModeChanged(_ sender: NSSegmentedControl) {
-        sidebarMode = SidebarMode(rawValue: sender.selectedSegment) ?? .documents
+        sidebarMode = SidebarMode(rawValue: sender.selectedSegment) ?? (currentContentKind == .image ? .images : .documents)
         isUpdatingSidebarSelection = true
         sidebarTable.reloadData()
         sidebarTable.deselectAll(nil)
-        if sidebarMode == .documents, let index = currentSiblingIndex {
+        if sidebarMatchesCurrentContent, let index = currentSiblingIndex {
             sidebarTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
             sidebarTable.scrollRowToVisible(index)
         }
@@ -1101,7 +1459,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        sidebarMode == .documents ? siblingURLs.count : documentHeadings.count
+        switch sidebarMode {
+        case .images: return imageURLs.count
+        case .documents: return documentURLs.count
+        case .outline: return documentHeadings.count
+        }
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -1125,8 +1487,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             ])
         }
         let name: String
-        if sidebarMode == .documents {
-            name = siblingURLs[row].lastPathComponent
+        if sidebarMode == .images {
+            name = imageURLs[row].lastPathComponent
+            cell.textField?.font = .systemFont(ofSize: 12.5)
+            cell.textField?.textColor = .labelColor
+        } else if sidebarMode == .documents {
+            name = documentURLs[row].lastPathComponent
             cell.textField?.font = .systemFont(ofSize: 12.5)
             cell.textField?.textColor = .labelColor
         } else {
@@ -1148,9 +1514,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             jumpToHeading(documentHeadings[row], index: row)
             return
         }
-        guard siblingURLs.indices.contains(row), row != currentSiblingIndex else { return }
+        let urls = sidebarMode == .images ? imageURLs : documentURLs
+        guard urls.indices.contains(row) else { return }
+        if urls[row].standardizedFileURL == fileURL?.standardizedFileURL { return }
         if confirmLeavingCurrentDocument() {
-            fileURL = siblingURLs[row]
+            fileURL = urls[row]
             load(fileURL)
         } else {
             updateNavigationControls()
@@ -1177,7 +1545,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     fileprivate func handleNavigationKey(_ event: NSEvent) -> Bool {
-        guard currentMode == .reading else { return false }
+        guard currentContentKind == .image || currentMode == .reading else { return false }
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
         guard modifiers.isEmpty else { return false }
         switch event.keyCode {
@@ -1357,6 +1725,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     private func applyMode(_ mode: ViewMode) {
+        guard currentContentKind == .markdown else { return }
         currentMode = mode
         modeControl.selectedSegment = mode.rawValue
         editorContainer.isHidden = mode == .reading
@@ -1418,6 +1787,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     @objc func showSyntaxGuide(_ sender: Any?) {
+        guard currentContentKind == .markdown else { return }
         if syntaxPopover?.isShown == true {
             syntaxGuideController?.focusSearch()
             return
@@ -1527,6 +1897,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     @objc func copyMarkdownSource(_ sender: Any?) {
+        guard currentContentKind == .markdown else { return }
         let previousStatus = statusLabel.stringValue
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -1557,14 +1928,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     @objc func save(_ sender: Any?) {
+        guard currentContentKind == .markdown else { return }
         guard let url = fileURL else { saveAs(sender); return }
         write(to: url)
     }
 
     @objc func saveAs(_ sender: Any?) {
+        guard currentContentKind == .markdown else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.init(filenameExtension: "md")!]
         panel.nameFieldStringValue = fileURL?.lastPathComponent ?? "未命名.md"
+        panel.directoryURL = fileURL?.deletingLastPathComponent()
         guard panel.runModal() == .OK, let url = panel.url else { return }
         fileURL = url
         write(to: url)
@@ -1585,9 +1959,110 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         }
     }
 
-    @objc func zoomIn(_ sender: Any?) { fontScale = min(1.5, fontScale + 0.1); renderPreview() }
-    @objc func zoomOut(_ sender: Any?) { fontScale = max(0.75, fontScale - 0.1); renderPreview() }
-    @objc func zoomReset(_ sender: Any?) { fontScale = 1.0; renderPreview() }
+    private func rememberImageZoomPreference() {
+        UserDefaults.standard.set(imageZoomMode.rawValue, forKey: "LightMarkImageZoomMode")
+        UserDefaults.standard.set(Double(imageScale), forKey: "LightMarkImageZoomScale")
+    }
+
+    private func updateImageControls() {
+        let percent = Int((imageScale * 100).rounded())
+        imageZoomLabel.stringValue = imageZoomMode == .fit ? "适合 \(percent)%" : "\(percent)%"
+        imageZoomOutButton.isEnabled = imageScale > 0.0501
+        imageZoomInButton.isEnabled = imageScale < 7.999
+        imageFitButton.state = imageZoomMode == .fit ? .on : .off
+        imageActualButton.state = imageZoomMode == .actual ? .on : .off
+    }
+
+    private func setImageScale(_ scale: CGFloat, mode: ImageZoomMode, preserveCenter: Bool = false, alignTop: Bool = false) {
+        guard imageCanvas.naturalSize.width > 0, imageCanvas.naturalSize.height > 0 else { return }
+        let clipView = imageScroll.contentView
+        let oldSize = imageCanvas.frame.size
+        let centerRatioX = oldSize.width > 0 ? clipView.bounds.midX / oldSize.width : 0.5
+        let centerRatioY = oldSize.height > 0 ? clipView.bounds.midY / oldSize.height : 0.5
+
+        imageScale = min(8, max(0.05, scale))
+        imageZoomMode = mode
+        rememberImageZoomPreference()
+        imageCanvas.updateScale(imageScale, viewportSize: clipView.bounds.size)
+        imageScroll.layoutSubtreeIfNeeded()
+        updateImageControls()
+
+        let newSize = imageCanvas.frame.size
+        let viewport = clipView.bounds.size
+        let origin: NSPoint
+        if preserveCenter {
+            origin = NSPoint(
+                x: centerRatioX * newSize.width - viewport.width / 2,
+                y: centerRatioY * newSize.height - viewport.height / 2
+            )
+        } else {
+            origin = NSPoint(
+                x: max(0, (newSize.width - viewport.width) / 2),
+                y: alignTop ? 0 : max(0, (newSize.height - viewport.height) / 2)
+            )
+        }
+        let constrained = clipView.constrainBoundsRect(NSRect(origin: origin, size: viewport))
+        clipView.scroll(to: constrained.origin)
+        imageScroll.reflectScrolledClipView(clipView)
+    }
+
+    private func fitImage(alignTop: Bool = false) {
+        let availableWidth = max(1, imageScroll.contentView.bounds.width - 48)
+        let availableHeight = max(1, imageScroll.contentView.bounds.height - 48)
+        let scale = min(
+            1,
+            availableWidth / max(1, imageCanvas.naturalSize.width),
+            availableHeight / max(1, imageCanvas.naturalSize.height)
+        )
+        setImageScale(scale, mode: .fit, alignTop: alignTop)
+    }
+
+    private func applyImageZoomPreference(alignTop: Bool) {
+        switch imageZoomMode {
+        case .fit: fitImage(alignTop: alignTop)
+        case .actual: setImageScale(1, mode: .actual, alignTop: alignTop)
+        case .custom: setImageScale(imageScale, mode: .custom, alignTop: alignTop)
+        }
+    }
+
+    private func zoomImage(by factor: CGFloat) {
+        setImageScale(imageScale * factor, mode: .custom, preserveCenter: true)
+    }
+
+    @objc private func zoomImageOut(_ sender: Any?) { zoomImage(by: 1 / 1.2) }
+    @objc private func zoomImageIn(_ sender: Any?) { zoomImage(by: 1.2) }
+    @objc private func fitImageToWindow(_ sender: Any?) { fitImage() }
+    @objc private func showImageAtActualSize(_ sender: Any?) { setImageScale(1, mode: .actual) }
+
+    @objc func zoomIn(_ sender: Any?) {
+        if currentContentKind == .image { zoomImage(by: 1.2); return }
+        fontScale = min(1.5, fontScale + 0.1)
+        renderPreview()
+    }
+
+    @objc func zoomOut(_ sender: Any?) {
+        if currentContentKind == .image { zoomImage(by: 1 / 1.2); return }
+        fontScale = max(0.75, fontScale - 0.1)
+        renderPreview()
+    }
+
+    @objc func zoomReset(_ sender: Any?) {
+        if currentContentKind == .image { showImageAtActualSize(sender); return }
+        fontScale = 1.0
+        renderPreview()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard currentContentKind == .image else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.imageZoomMode == .fit {
+                self.fitImage()
+            } else {
+                self.setImageScale(self.imageScale, mode: self.imageZoomMode, preserveCenter: true)
+            }
+        }
+    }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard hasUnsavedChanges else { return true }
@@ -1633,7 +2108,7 @@ final class DropView: NSView {
 
     private func acceptableURL(from sender: NSDraggingInfo) -> URL? {
         guard let value = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self])?.first as? URL,
-              ["md", "markdown", "txt"].contains(value.pathExtension.lowercased()) else { return nil }
+              isSupportedContentURL(value) else { return nil }
         return value
     }
 }
