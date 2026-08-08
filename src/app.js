@@ -13,12 +13,14 @@ import {
   findTextMatches,
   fileNameFromPath,
   formatSelection,
+  imageExtensions,
   isExternalUrl,
-  isMarkdownName,
   isRelativeImageSource,
   mapScrollByAnchors,
+  preferredOpenDirectory,
   renderEditorDecorations,
   sortDocuments,
+  supportedFileKind,
 } from "./core.js";
 
 const elements = {
@@ -29,6 +31,7 @@ const elements = {
   previous: document.querySelector("#previous-document"),
   next: document.querySelector("#next-document"),
   pageIndicator: document.querySelector("#page-indicator"),
+  modeSwitcher: document.querySelector("#mode-switcher"),
   modeButtons: [...document.querySelectorAll("[data-mode]")],
   themeToggle: document.querySelector("#theme-toggle"),
   syntaxHelp: document.querySelector("#syntax-help"),
@@ -40,14 +43,17 @@ const elements = {
   workspace: document.querySelector(".workspace"),
   sidebar: document.querySelector("#sidebar"),
   documentsTab: document.querySelector("#documents-tab"),
+  imagesTab: document.querySelector("#images-tab"),
   outlineTab: document.querySelector("#outline-tab"),
   sidebarResizer: document.querySelector("#sidebar-resizer"),
   collapseSidebar: document.querySelector("#collapse-sidebar"),
   expandSidebar: document.querySelector("#expand-sidebar"),
   folderName: document.querySelector("#folder-name"),
   documentList: document.querySelector("#document-list"),
+  imageList: document.querySelector("#image-list"),
   outlineList: document.querySelector("#outline-list"),
   emptyList: document.querySelector("#empty-list"),
+  emptyImages: document.querySelector("#empty-images"),
   emptyOutline: document.querySelector("#empty-outline"),
   title: document.querySelector("#document-title"),
   path: document.querySelector("#document-path"),
@@ -76,6 +82,17 @@ const elements = {
   htmlCompletion: document.querySelector("#html-completion"),
   preview: document.querySelector("#preview"),
   previewLoading: document.querySelector("#preview-loading"),
+  imageViewer: document.querySelector("#image-viewer"),
+  imageStage: document.querySelector("#image-stage"),
+  imageCanvas: document.querySelector("#image-canvas"),
+  imageContent: document.querySelector("#image-content"),
+  imageLoading: document.querySelector("#image-loading"),
+  imageZoomOut: document.querySelector("#image-zoom-out"),
+  imageZoomIn: document.querySelector("#image-zoom-in"),
+  imageZoomLabel: document.querySelector("#image-zoom-label"),
+  imageFit: document.querySelector("#image-fit"),
+  imageActual: document.querySelector("#image-actual"),
+  imageDetails: document.querySelector("#image-details"),
   saveStatus: document.querySelector("#save-status"),
   modeStatus: document.querySelector("#mode-status"),
   syntaxDialog: document.querySelector("#syntax-dialog"),
@@ -107,7 +124,9 @@ const elements = {
 
 const state = {
   documents: [],
+  images: [],
   headings: [],
+  contentKind: "markdown",
   currentPath: null,
   currentDirectory: null,
   lastSavedText: "",
@@ -134,6 +153,13 @@ const state = {
   completionItems: [],
   completionIndex: 0,
   sidebarView: "documents",
+  imageScale: 1,
+  imageZoomMode: "fit",
+  imageNaturalWidth: 0,
+  imageNaturalHeight: 0,
+  imageByteSize: 0,
+  imageMimeType: "",
+  imageDrag: null,
   copyFeedbackTimer: 0,
   findMatches: [],
   findIndex: -1,
@@ -150,6 +176,10 @@ const SIDEBAR_MAX_WIDTH = 420;
 const SPLIT_DIVIDER_WIDTH = 7;
 const AI_MIN_WIDTH = 300;
 const AI_MAX_WIDTH = 560;
+const IMAGE_MIN_SCALE = 0.05;
+const IMAGE_MAX_SCALE = 8;
+const IMAGE_ZOOM_MODE_STORAGE_KEY = "lightmark-image-zoom-mode";
+const IMAGE_ZOOM_SCALE_STORAGE_KEY = "lightmark-image-zoom-scale";
 
 const htmlCompletions = Object.freeze([
   { key: "br", label: "换到下一行", text: "<br>" },
@@ -214,10 +244,10 @@ const syntaxTemplates = Object.freeze({
 
 listen("single-instance", (event) => {
   const paths = Array.isArray(event.payload) ? event.payload : [];
-  const markdownPath = paths.find(isMarkdownName);
-  if (markdownPath) {
-    guardUnsaved(() => loadDocument(markdownPath, { refreshSiblings: true }))
-      .catch((error) => showError("无法打开文档", error));
+  const supportedPath = paths.find((path) => supportedFileKind(path));
+  if (supportedPath) {
+    guardUnsaved(() => openSupportedPath(supportedPath, { refreshSiblings: true }))
+      .catch((error) => showError("无法打开文件", error));
   }
 }).catch(console.error);
 
@@ -299,9 +329,15 @@ async function renderPreview() {
 }
 
 function setDirty(dirty) {
-  state.dirty = dirty;
-  elements.dirtyDot.classList.toggle("visible", dirty);
-  elements.saveStatus.textContent = dirty ? "有未保存修改 · Ctrl+S 保存" : state.currentPath ? "已保存" : "未打开文档";
+  state.dirty = state.contentKind === "markdown" && dirty;
+  elements.dirtyDot.classList.toggle("visible", state.dirty);
+  elements.saveStatus.textContent = state.contentKind === "image" && state.currentPath
+    ? "本地图片 · 只读"
+    : state.dirty
+      ? "有未保存修改 · Ctrl+S 保存"
+      : state.currentPath
+        ? "已保存"
+        : "未打开文档";
   updateWindowTitle();
 }
 
@@ -316,44 +352,64 @@ async function updateWindowTitle() {
 }
 
 async function refreshDirectory(directoryPath) {
-  const documents = await invoke("list_markdown_files", { directoryPath });
+  const [documents, images] = await Promise.all([
+    invoke("list_markdown_files", { directoryPath }),
+    invoke("list_image_files", { directoryPath }),
+  ]);
   state.documents = sortDocuments(documents);
+  state.images = sortDocuments(images);
   state.currentDirectory = directoryPath;
   elements.folderName.textContent = fileNameFromPath(directoryPath) || directoryPath;
   renderDocumentList();
 }
 
-function renderDocumentList() {
-  elements.documentList.replaceChildren();
-  state.documents.forEach((documentEntry, index) => {
+function renderFileList(entries, container, kind) {
+  container.replaceChildren();
+  entries.forEach((entry, index) => {
     const button = document.createElement("button");
     button.className = "document-item";
-    button.classList.toggle("active", documentEntry.path === state.currentPath);
-    button.setAttribute("aria-current", documentEntry.path === state.currentPath ? "page" : "false");
-    button.title = documentEntry.path;
+    button.classList.toggle("active", entry.path === state.currentPath);
+    button.setAttribute("aria-current", entry.path === state.currentPath ? "page" : "false");
+    button.title = entry.path;
     button.innerHTML = `<span class="document-number">${String(index + 1).padStart(2, "0")}</span><span class="document-name"></span>`;
-    button.querySelector(".document-name").textContent = documentEntry.name;
-    button.addEventListener("click", () => guardUnsaved(() => loadDocument(documentEntry.path)));
-    elements.documentList.append(button);
+    button.querySelector(".document-name").textContent = entry.name;
+    button.addEventListener("click", () => guardUnsaved(() => (
+      kind === "image" ? loadImage(entry.path) : loadDocument(entry.path)
+    )));
+    container.append(button);
   });
+}
+
+function renderDocumentList() {
+  renderFileList(state.documents, elements.documentList, "markdown");
+  renderFileList(state.images, elements.imageList, "image");
   updateNavigation();
   updateSidebarView();
 }
 
 function updateSidebarView() {
   const showingDocuments = state.sidebarView === "documents";
+  const showingImages = state.sidebarView === "images";
+  const showingOutline = state.sidebarView === "outline";
   elements.documentsTab.classList.toggle("active", showingDocuments);
-  elements.outlineTab.classList.toggle("active", !showingDocuments);
+  elements.imagesTab.classList.toggle("active", showingImages);
+  elements.outlineTab.classList.toggle("active", showingOutline);
   elements.documentsTab.setAttribute("aria-selected", String(showingDocuments));
-  elements.outlineTab.setAttribute("aria-selected", String(!showingDocuments));
+  elements.imagesTab.setAttribute("aria-selected", String(showingImages));
+  elements.outlineTab.setAttribute("aria-selected", String(showingOutline));
+  elements.outlineTab.disabled = state.contentKind === "image";
   elements.documentList.hidden = !showingDocuments;
-  elements.outlineList.hidden = showingDocuments;
+  elements.imageList.hidden = !showingImages;
+  elements.outlineList.hidden = !showingOutline;
   elements.emptyList.hidden = !showingDocuments || state.documents.length > 0;
-  elements.emptyOutline.hidden = showingDocuments || state.headings.length > 0;
+  elements.emptyImages.hidden = !showingImages || state.images.length > 0;
+  elements.emptyOutline.hidden = !showingOutline || state.headings.length > 0;
 }
 
 function setSidebarView(view) {
-  state.sidebarView = view === "outline" ? "outline" : "documents";
+  const allowed = ["documents", "images", "outline"];
+  state.sidebarView = allowed.includes(view) ? view : "documents";
+  if (state.contentKind === "image" && state.sidebarView === "outline") state.sidebarView = "images";
   updateSidebarView();
 }
 
@@ -394,6 +450,173 @@ function jumpToHeading(heading, index) {
   if (state.mode === "split") setTimeout(() => scrollPreviewToHeading(index), 0);
 }
 
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function restoreImageZoomPreference() {
+  const storedMode = localStorage.getItem(IMAGE_ZOOM_MODE_STORAGE_KEY);
+  const storedScale = Number(localStorage.getItem(IMAGE_ZOOM_SCALE_STORAGE_KEY));
+  state.imageZoomMode = ["fit", "actual", "custom"].includes(storedMode) ? storedMode : "fit";
+  state.imageScale = Number.isFinite(storedScale)
+    ? Math.min(IMAGE_MAX_SCALE, Math.max(IMAGE_MIN_SCALE, storedScale))
+    : 1;
+}
+
+function rememberImageZoomPreference() {
+  localStorage.setItem(IMAGE_ZOOM_MODE_STORAGE_KEY, state.imageZoomMode);
+  localStorage.setItem(IMAGE_ZOOM_SCALE_STORAGE_KEY, String(state.imageScale));
+}
+
+function setContentKind(kind) {
+  const imageMode = kind === "image";
+  state.contentKind = imageMode ? "image" : "markdown";
+  elements.contentPanes.hidden = imageMode;
+  elements.imageViewer.hidden = !imageMode;
+  elements.modeSwitcher.hidden = imageMode;
+  elements.saveFile.disabled = imageMode;
+  elements.saveAs.disabled = imageMode;
+  elements.copyMenuToggle.disabled = imageMode || !state.currentPath;
+  elements.aiToggle.disabled = imageMode;
+  elements.syntaxHelp.disabled = imageMode;
+  elements.previous.setAttribute("aria-label", imageMode ? "上一张" : "上一篇");
+  elements.next.setAttribute("aria-label", imageMode ? "下一张" : "下一篇");
+  elements.previous.title = imageMode ? "上一张（←）" : "上一篇（←）";
+  elements.next.title = imageMode ? "下一张（→）" : "下一篇（→）";
+  elements.dirtyDot.classList.toggle("visible", !imageMode && state.dirty);
+  if (imageMode) {
+    setCopyMenu(false);
+    closeHtmlCompletion();
+    if (!elements.findBar.hidden) closeFindBar();
+    if (state.aiOpen) setAiOpen(false);
+    if (state.sidebarView === "outline") state.sidebarView = "images";
+  }
+  updateSidebarView();
+  updateModeStatus();
+  updateCopyAvailability();
+  updateAiControls();
+}
+
+function updateImageControls() {
+  const percent = Math.round(state.imageScale * 100);
+  elements.imageZoomLabel.value = state.imageZoomMode === "fit" ? `适合 ${percent}%` : `${percent}%`;
+  elements.imageZoomLabel.textContent = elements.imageZoomLabel.value;
+  elements.imageZoomOut.disabled = state.imageScale <= IMAGE_MIN_SCALE + 0.001;
+  elements.imageZoomIn.disabled = state.imageScale >= IMAGE_MAX_SCALE - 0.001;
+  elements.imageFit.classList.toggle("active", state.imageZoomMode === "fit");
+  elements.imageActual.classList.toggle("active", state.imageZoomMode === "actual");
+}
+
+function setImageScale(scale, mode = "custom", { preserveCenter = false, alignTop = false } = {}) {
+  if (!state.imageNaturalWidth || !state.imageNaturalHeight) return;
+  const stage = elements.imageStage;
+  const centerX = stage.scrollWidth ? (stage.scrollLeft + stage.clientWidth / 2) / stage.scrollWidth : 0.5;
+  const centerY = stage.scrollHeight ? (stage.scrollTop + stage.clientHeight / 2) / stage.scrollHeight : 0.5;
+  state.imageScale = Math.min(IMAGE_MAX_SCALE, Math.max(IMAGE_MIN_SCALE, scale));
+  state.imageZoomMode = mode;
+  rememberImageZoomPreference();
+  const imageWidth = Math.max(1, Math.round(state.imageNaturalWidth * state.imageScale));
+  const imageHeight = Math.max(1, Math.round(state.imageNaturalHeight * state.imageScale));
+  elements.imageContent.style.width = `${imageWidth}px`;
+  elements.imageContent.style.height = `${imageHeight}px`;
+  elements.imageCanvas.style.width = `${Math.max(stage.clientWidth, imageWidth + 48)}px`;
+  elements.imageCanvas.style.height = `${Math.max(stage.clientHeight, imageHeight + 48)}px`;
+  updateImageControls();
+  requestAnimationFrame(() => {
+    if (preserveCenter) {
+      stage.scrollLeft = centerX * stage.scrollWidth - stage.clientWidth / 2;
+      stage.scrollTop = centerY * stage.scrollHeight - stage.clientHeight / 2;
+    } else {
+      stage.scrollLeft = Math.max(0, (stage.scrollWidth - stage.clientWidth) / 2);
+      stage.scrollTop = alignTop ? 0 : Math.max(0, (stage.scrollHeight - stage.clientHeight) / 2);
+    }
+  });
+}
+
+function fitImage({ alignTop = false } = {}) {
+  if (!state.imageNaturalWidth || !state.imageNaturalHeight) return;
+  const availableWidth = Math.max(1, elements.imageStage.clientWidth - 48);
+  const availableHeight = Math.max(1, elements.imageStage.clientHeight - 48);
+  const scale = Math.min(1, availableWidth / state.imageNaturalWidth, availableHeight / state.imageNaturalHeight);
+  setImageScale(scale, "fit", { alignTop });
+}
+
+function showImageAtActualSize({ alignTop = false } = {}) {
+  setImageScale(1, "actual", { alignTop });
+}
+
+function zoomImage(factor) {
+  setImageScale(state.imageScale * factor, "custom", { preserveCenter: true });
+}
+
+function applyImageZoomPreference({ alignTop = false } = {}) {
+  if (state.imageZoomMode === "fit") fitImage({ alignTop });
+  else if (state.imageZoomMode === "actual") showImageAtActualSize({ alignTop });
+  else setImageScale(state.imageScale, "custom", { alignTop });
+}
+
+function updateImageDetails() {
+  const type = state.imageMimeType.replace("image/", "").replace("jpeg", "JPG").toLocaleUpperCase();
+  elements.imageDetails.textContent = `${state.imageNaturalWidth} × ${state.imageNaturalHeight} · ${formatFileSize(state.imageByteSize)} · ${type}`;
+}
+
+async function loadImage(path, { refreshSiblings = false } = {}) {
+  const previousPath = state.currentPath;
+  const payload = await invoke("read_image", { path });
+  if (refreshSiblings || state.currentDirectory !== payload.directory) {
+    await refreshDirectory(payload.directory);
+  }
+  state.currentPath = payload.path;
+  state.currentDirectory = payload.directory;
+  state.lastSavedText = "";
+  state.imageByteSize = payload.byteSize;
+  state.imageMimeType = payload.mimeType;
+  state.imageNaturalWidth = 0;
+  state.imageNaturalHeight = 0;
+  elements.editor.value = "";
+  state.headings = [];
+  elements.outlineList.replaceChildren();
+  elements.title.textContent = payload.name;
+  elements.path.textContent = payload.path;
+  state.sidebarView = "images";
+  setContentKind("image");
+  setDirty(false);
+  renderDocumentList();
+  elements.imageLoading.textContent = "正在读取本地图片…";
+  elements.imageLoading.classList.remove("hidden");
+  elements.imageDetails.textContent = `${formatFileSize(payload.byteSize)} · 正在读取尺寸`;
+  elements.imageContent.removeAttribute("src");
+  elements.imageContent.alt = payload.name;
+  await new Promise((resolveImage, rejectImage) => {
+    elements.imageContent.onload = resolveImage;
+    elements.imageContent.onerror = () => {
+      elements.imageLoading.textContent = "无法显示这张图片";
+      rejectImage(new Error("Windows WebView2 无法解码这张图片。"));
+    };
+    elements.imageContent.src = payload.dataUrl;
+  });
+  state.imageNaturalWidth = elements.imageContent.naturalWidth;
+  state.imageNaturalHeight = elements.imageContent.naturalHeight;
+  updateImageDetails();
+  elements.imageLoading.classList.add("hidden");
+  requestAnimationFrame(() => applyImageZoomPreference({ alignTop: true }));
+  updateCopyAvailability();
+  updateAiContextSummary();
+  updateAiControls();
+  if (previousPath && previousPath !== payload.path) resetAiConversation();
+  elements.imageStage.focus({ preventScroll: true });
+}
+
+async function openSupportedPath(path, options = {}) {
+  const kind = supportedFileKind(path);
+  if (kind === "markdown") return loadDocument(path, options);
+  if (kind === "image") return loadImage(path, options);
+  throw new Error("只支持 Markdown、PNG、JPG、JPEG、WebP、GIF 和 BMP 文件。");
+}
+
 async function loadDocument(path, { refreshSiblings = false } = {}) {
   const previousPath = state.currentPath;
   const payload = await invoke("read_document", { path });
@@ -402,6 +625,11 @@ async function loadDocument(path, { refreshSiblings = false } = {}) {
   }
   state.currentPath = payload.path;
   state.currentDirectory = payload.directory;
+  setContentKind("markdown");
+  elements.imageContent.removeAttribute("src");
+  state.imageNaturalWidth = 0;
+  state.imageNaturalHeight = 0;
+  if (state.sidebarView === "images") state.sidebarView = "documents";
   state.previewSyncOffset = 0;
   state.previewProgrammaticTarget = null;
   state.lastSavedText = payload.contents;
@@ -431,33 +659,39 @@ async function chooseFile() {
   const path = singleDialogPath(await open({
     multiple: false,
     directory: false,
-    title: "打开 Markdown 文件",
-    filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+    title: "打开 Markdown 或图片",
+    defaultPath: preferredOpenDirectory(state.currentDirectory),
+    filters: [
+      { name: "Markdown 与图片", extensions: ["md", "markdown", ...imageExtensions] },
+      { name: "Markdown", extensions: ["md", "markdown"] },
+      { name: "图片", extensions: imageExtensions },
+    ],
   }));
-  if (path) await guardUnsaved(() => loadDocument(path, { refreshSiblings: true }));
+  if (path) await guardUnsaved(() => openSupportedPath(path, { refreshSiblings: true }));
 }
 
 async function chooseFolder() {
   const selectedPath = singleDialogPath(await open({
     multiple: false,
     directory: false,
-    title: "选择文件夹中的任意 Markdown 文档",
-    filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+    title: "选择文件夹中的任意 Markdown 或图片",
+    defaultPath: preferredOpenDirectory(state.currentDirectory),
+    filters: [{ name: "Markdown 与图片", extensions: ["md", "markdown", ...imageExtensions] }],
   }));
   if (!selectedPath) return;
   const directoryPath = directoryFromPath(selectedPath);
   await guardUnsaved(async () => {
     await refreshDirectory(directoryPath);
-    if (!state.documents.length) {
-      await message("这个文件夹第一层没有 .md 或 .markdown 文件。", { title: "没有 Markdown 文档", kind: "info" });
+    if (!state.documents.length && !state.images.length) {
+      await message("这个文件夹第一层没有支持的 Markdown 或图片文件。", { title: "没有可阅读文件", kind: "info" });
       return;
     }
-    const selectedDocument = state.documents.find((item) => item.path.toLocaleLowerCase() === selectedPath.toLocaleLowerCase());
-    await loadDocument(selectedDocument?.path || state.documents[0].path);
+    await openSupportedPath(selectedPath);
   });
 }
 
 async function saveDocument() {
+  if (state.contentKind === "image") return false;
   if (!state.currentPath) return saveDocumentAs();
   await invoke("write_document", { path: state.currentPath, contents: elements.editor.value });
   state.lastSavedText = elements.editor.value;
@@ -466,6 +700,7 @@ async function saveDocument() {
 }
 
 async function saveDocumentAs() {
+  if (state.contentKind === "image") return false;
   const path = await save({
     title: "另存为 Markdown",
     defaultPath: state.currentPath || "未命名.md",
@@ -490,12 +725,13 @@ async function runPendingAction() {
 }
 
 function currentIndex() {
-  return state.documents.findIndex((item) => item.path === state.currentPath);
+  const entries = state.contentKind === "image" ? state.images : state.documents;
+  return entries.findIndex((item) => item.path === state.currentPath);
 }
 
 function updateNavigation() {
   const index = currentIndex();
-  const total = state.documents.length;
+  const total = state.contentKind === "image" ? state.images.length : state.documents.length;
   elements.pageIndicator.value = index >= 0 ? `${index + 1} / ${total}` : total ? `— / ${total}` : "— / —";
   elements.pageIndicator.textContent = elements.pageIndicator.value;
   elements.previous.disabled = index <= 0;
@@ -504,11 +740,18 @@ function updateNavigation() {
 
 async function navigate(by) {
   const index = currentIndex();
-  const destination = state.documents[index + by];
-  if (destination) await guardUnsaved(() => loadDocument(destination.path));
+  const entries = state.contentKind === "image" ? state.images : state.documents;
+  const destination = entries[index + by];
+  if (destination) await guardUnsaved(() => (
+    state.contentKind === "image" ? loadImage(destination.path) : loadDocument(destination.path)
+  ));
 }
 
 function updateModeStatus() {
+  if (state.contentKind === "image") {
+    elements.modeStatus.textContent = "图片阅读 · ← → 切换 · 滚轮缩放";
+    return;
+  }
   if (state.mode === "reading") {
     elements.modeStatus.textContent = "阅读模式 · ← → 翻页";
     return;
@@ -566,6 +809,7 @@ function resetPreviewAlignment() {
 }
 
 function setMode(mode) {
+  if (state.contentKind === "image") return;
   const previousMode = state.mode;
   state.mode = mode;
   if (mode === "split" && previousMode !== "split") state.previewSyncOffset = 0;
@@ -1074,7 +1318,7 @@ function cycleTheme() {
 }
 
 function updateCopyAvailability() {
-  const noDocument = !state.currentPath;
+  const noDocument = !state.currentPath || state.contentKind !== "markdown";
   elements.copyMenuToggle.disabled = noDocument;
   Object.values(quickInsertDetails).forEach(({ button }) => {
     button.disabled = noDocument || state.mode === "reading";
@@ -1250,6 +1494,7 @@ function stepFind(by) {
 }
 
 function showFindBar() {
+  if (state.contentKind === "image") return;
   if (elements.syntaxDialog.open) elements.syntaxDialog.close();
   elements.findBar.hidden = false;
   refreshFindResults();
@@ -1260,7 +1505,7 @@ function showFindBar() {
 function closeFindBar() {
   elements.findBar.hidden = true;
   elements.preview.contentWindow?.getSelection()?.removeAllRanges();
-  if (state.mode !== "reading") elements.editor.focus();
+  if (state.contentKind === "markdown" && state.mode !== "reading") elements.editor.focus();
 }
 
 function initializeSyntaxCopyButtons() {
@@ -1302,14 +1547,15 @@ function showSyntaxGuide() {
 
 async function handleDroppedPath(path) {
   await guardUnsaved(async () => {
-    if (isMarkdownName(path)) {
-      await loadDocument(path, { refreshSiblings: true });
+    if (supportedFileKind(path)) {
+      await openSupportedPath(path, { refreshSiblings: true });
       return;
     }
     try {
       await refreshDirectory(path);
       if (state.documents.length) await loadDocument(state.documents[0].path);
-      else await message("拖入的文件夹第一层没有 Markdown 文档。", { title: "没有 Markdown 文档", kind: "info" });
+      else if (state.images.length) await loadImage(state.images[0].path);
+      else await message("拖入的文件夹第一层没有支持的 Markdown 或图片文件。", { title: "没有可阅读文件", kind: "info" });
     } catch (error) {
       await showError("无法打开拖入项目", error);
     }
@@ -1322,7 +1568,7 @@ function setAiConnection(label, tone = "") {
 }
 
 function updateAiControls() {
-  const canAsk = state.aiReady && state.aiSignedIn && Boolean(state.currentPath) && !state.aiBusy;
+  const canAsk = state.aiReady && state.aiSignedIn && state.contentKind === "markdown" && Boolean(state.currentPath) && !state.aiBusy;
   const answerDetails = answerModeDetails(currentAiAnswerMode());
   elements.aiQuestion.disabled = !canAsk;
   elements.aiSend.disabled = !canAsk || !elements.aiQuestion.value.trim();
@@ -1627,7 +1873,46 @@ elements.modeButtons.forEach((button) => button.addEventListener("click", () => 
 elements.collapseSidebar.addEventListener("click", toggleSidebar);
 elements.expandSidebar.addEventListener("click", toggleSidebar);
 elements.documentsTab.addEventListener("click", () => setSidebarView("documents"));
+elements.imagesTab.addEventListener("click", () => setSidebarView("images"));
 elements.outlineTab.addEventListener("click", () => setSidebarView("outline"));
+elements.imageZoomOut.addEventListener("click", () => zoomImage(1 / 1.2));
+elements.imageZoomIn.addEventListener("click", () => zoomImage(1.2));
+elements.imageFit.addEventListener("click", fitImage);
+elements.imageActual.addEventListener("click", showImageAtActualSize);
+elements.imageStage.addEventListener("wheel", (event) => {
+  if (state.contentKind !== "image") return;
+  event.preventDefault();
+  zoomImage(event.deltaY < 0 ? 1.12 : 1 / 1.12);
+}, { passive: false });
+elements.imageStage.addEventListener("dblclick", () => {
+  if (state.imageZoomMode === "actual") fitImage();
+  else showImageAtActualSize();
+});
+elements.imageStage.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || state.contentKind !== "image") return;
+  state.imageDrag = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    left: elements.imageStage.scrollLeft,
+    top: elements.imageStage.scrollTop,
+  };
+  elements.imageStage.setPointerCapture(event.pointerId);
+  elements.imageStage.classList.add("dragging");
+});
+elements.imageStage.addEventListener("pointermove", (event) => {
+  if (!state.imageDrag || state.imageDrag.pointerId !== event.pointerId) return;
+  elements.imageStage.scrollLeft = state.imageDrag.left - (event.clientX - state.imageDrag.x);
+  elements.imageStage.scrollTop = state.imageDrag.top - (event.clientY - state.imageDrag.y);
+});
+function stopImageDrag(event) {
+  if (!state.imageDrag || state.imageDrag.pointerId !== event.pointerId) return;
+  state.imageDrag = null;
+  elements.imageStage.classList.remove("dragging");
+}
+elements.imageStage.addEventListener("pointerup", stopImageDrag);
+elements.imageStage.addEventListener("pointercancel", stopImageDrag);
+elements.imageContent.addEventListener("dragstart", (event) => event.preventDefault());
 elements.paneSwap.addEventListener("click", swapPaneSides);
 elements.syncMode.addEventListener("change", () => setScrollSyncMode(elements.syncMode.value));
 elements.resetSync.addEventListener("click", resetPreviewAlignment);
@@ -1768,6 +2053,7 @@ document.addEventListener("keydown", (event) => {
   }
   if (control && event.key.toLocaleLowerCase() === "s") {
     event.preventDefault();
+    if (state.contentKind === "image") return;
     const action = event.shiftKey ? saveDocumentAs() : saveDocument();
     action.catch((error) => showError("无法保存文件", error));
     return;
@@ -1780,16 +2066,19 @@ document.addEventListener("keydown", (event) => {
   }
   if (control && event.shiftKey && event.key.toLocaleLowerCase() === "c") {
     event.preventDefault();
+    if (state.contentKind === "image") return;
     copyDocument("markdown").catch((error) => showError("无法复制 Markdown 原文", error));
     return;
   }
   if (control && event.key.toLocaleLowerCase() === "f") {
     event.preventDefault();
+    if (state.contentKind === "image") return;
     showFindBar();
     return;
   }
   if (control && event.key === "/") {
     event.preventDefault();
+    if (state.contentKind === "image") return;
     showSyntaxGuide();
     return;
   }
@@ -1802,6 +2091,25 @@ document.addEventListener("keydown", (event) => {
     || event.target instanceof HTMLTextAreaElement
     || event.target instanceof HTMLSelectElement
     || event.target?.isContentEditable;
+  if (state.contentKind === "image" && !typingTarget && !elements.syntaxDialog.open && !elements.unsavedDialog.open) {
+    if (event.key === "+" || event.key === "=") {
+      event.preventDefault();
+      zoomImage(1.2);
+    } else if (event.key === "-" || event.key === "_") {
+      event.preventDefault();
+      zoomImage(1 / 1.2);
+    } else if (event.key === "0") {
+      event.preventDefault();
+      fitImage();
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      navigate(-1).catch((error) => showError("无法打开上一张", error));
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      navigate(1).catch((error) => showError("无法打开下一张", error));
+    }
+    return;
+  }
   if (state.mode === "reading" && !typingTarget && !elements.syntaxDialog.open && !elements.unsavedDialog.open) {
     if (event.key === "ArrowLeft") {
       event.preventDefault();
@@ -1826,6 +2134,7 @@ getCurrentWindow().onCloseRequested((event) => {
 }).catch(console.error);
 
 async function start() {
+  restoreImageZoomPreference();
   applyTheme(state.theme);
   initializeSyntaxCopyButtons();
   renderEditorOverlay();
@@ -1845,8 +2154,8 @@ async function start() {
   await prepareRenderer();
   try {
     const startupPaths = await invoke("startup_paths");
-    const firstMarkdown = startupPaths.find(isMarkdownName);
-    if (firstMarkdown) await loadDocument(firstMarkdown, { refreshSiblings: true });
+    const firstSupported = startupPaths.find((path) => supportedFileKind(path));
+    if (firstSupported) await openSupportedPath(firstSupported, { refreshSiblings: true });
   } catch (error) {
     await showError("无法处理启动文件", error);
   }
@@ -1858,6 +2167,7 @@ new ResizeObserver(() => {
   updateSplitLayout();
   scheduleScrollAnchorRebuild();
   positionHtmlCompletion();
+  if (state.contentKind === "image" && state.imageZoomMode === "fit") fitImage();
 }).observe(elements.workspace);
 
 start();

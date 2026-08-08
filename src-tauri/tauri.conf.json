@@ -38,6 +38,12 @@
         "name": "Markdown 文档",
         "description": "Markdown 文档",
         "role": "Editor"
+      },
+      {
+        "ext": ["png", "jpg", "jpeg", "webp", "gif", "bmp"],
+        "name": "图片文件",
+        "description": "图片文件",
+        "role": "Viewer"
       }
     ],
     "windows": {

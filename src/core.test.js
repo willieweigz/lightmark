@@ -8,12 +8,16 @@ import {
   findTextMatches,
   fileNameFromPath,
   formatSelection,
+  imageExtensions,
   isExternalUrl,
+  isImageName,
   isMarkdownName,
   isRelativeImageSource,
   mapScrollByAnchors,
+  preferredOpenDirectory,
   renderEditorDecorations,
   sortDocuments,
+  supportedFileKind,
 } from "./core.js";
 
 describe("Markdown document helpers", () => {
@@ -36,10 +40,28 @@ describe("Markdown document helpers", () => {
     assert.equal(isMarkdownName("notes.txt"), false);
   });
 
+  it("recognizes the supported local image formats without treating SVG as executable content", () => {
+    assert.deepEqual(imageExtensions, ["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+    assert.equal(isImageName("照片.JPG"), true);
+    assert.equal(isImageName("插图.webp"), true);
+    assert.equal(isImageName("动画.GIF"), true);
+    assert.equal(isImageName("图标.svg"), false);
+    assert.equal(supportedFileKind("章节.md"), "markdown");
+    assert.equal(supportedFileKind("封面.png"), "image");
+    assert.equal(supportedFileKind("说明.txt"), null);
+  });
+
   it("handles Windows paths with drives, spaces, and Chinese characters", () => {
     const path = "D:\\资料 归档\\中文目录\\01-开始.md";
     assert.equal(fileNameFromPath(path), "01-开始.md");
     assert.equal(directoryFromPath(path), "D:\\资料 归档\\中文目录");
+  });
+
+  it("opens file dialogs from the current image or document directory", () => {
+    const currentDirectory = "G:\\微云同步文件夹\\obsidian\\RAW 健康\\肠胃 30讲";
+    assert.equal(preferredOpenDirectory(currentDirectory), currentDirectory);
+    assert.equal(preferredOpenDirectory(null), undefined);
+    assert.equal(preferredOpenDirectory("   "), undefined);
   });
 
   it("finds document text case-insensitively in reading order", () => {

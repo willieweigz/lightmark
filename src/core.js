@@ -1,8 +1,24 @@
 export const markdownExtensions = ["md", "markdown"];
+export const imageExtensions = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 
 export function isMarkdownName(name) {
   const extension = name.split(".").pop()?.toLocaleLowerCase();
   return markdownExtensions.includes(extension);
+}
+
+export function isImageName(name) {
+  const extension = name.split(".").pop()?.toLocaleLowerCase();
+  return imageExtensions.includes(extension);
+}
+
+export function supportedFileKind(name) {
+  if (isMarkdownName(name)) return "markdown";
+  if (isImageName(name)) return "image";
+  return null;
+}
+
+export function preferredOpenDirectory(currentDirectory) {
+  return typeof currentDirectory === "string" && currentDirectory.trim() ? currentDirectory : undefined;
 }
 
 export function sortDocuments(documents, locale = "zh-CN") {
