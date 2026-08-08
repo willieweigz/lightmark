@@ -38,6 +38,7 @@ fi
 rm -f "${BINARIES[@]}"
 
 cp "$PROJECT_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
+cp "$PROJECT_DIR/Resources/LightMark.icns" "$APP_DIR/Contents/Resources/LightMark.icns"
 cp "$PROJECT_DIR/Resources/preview.html" "$APP_DIR/Contents/Resources/preview.html"
 cp "$PROJECT_DIR/Resources/marked.min.js" "$APP_DIR/Contents/Resources/marked.min.js"
 cp "$PROJECT_DIR/Resources/purify.min.js" "$APP_DIR/Contents/Resources/purify.min.js"
