@@ -1,5 +1,27 @@
 import AppKit
+import UniformTypeIdentifiers
 import WebKit
+
+private let markdownExtensions: Set<String> = ["md", "markdown"]
+private let directlyReadableTextExtensions: Set<String> = ["md", "markdown", "txt"]
+private let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
+
+private func isMarkdownURL(_ url: URL) -> Bool {
+    markdownExtensions.contains(url.pathExtension.lowercased())
+}
+
+private func isImageURL(_ url: URL) -> Bool {
+    imageExtensions.contains(url.pathExtension.lowercased())
+}
+
+private func isSupportedContentURL(_ url: URL) -> Bool {
+    directlyReadableTextExtensions.contains(url.pathExtension.lowercased()) || isImageURL(url)
+}
+
+private enum ContentKind {
+    case markdown
+    case image
+}
 
 private enum ViewMode: Int {
     case reading = 0
@@ -8,8 +30,15 @@ private enum ViewMode: Int {
 }
 
 private enum SidebarMode: Int {
-    case documents = 0
-    case outline = 1
+    case images = 0
+    case documents = 1
+    case outline = 2
+}
+
+private enum ImageZoomMode: String {
+    case fit
+    case actual
+    case custom
 }
 
 private struct DocumentHeading {
@@ -41,6 +70,102 @@ private enum InlineFormatTool: Equatable {
         case .highlight: return "黄色高光笔"
         case .redText: return "红色笔"
         }
+    }
+}
+
+private final class ImageCanvasView: NSView {
+    let imageView = NSImageView()
+    weak var hostingScrollView: NSScrollView?
+    private var dragStartLocation: NSPoint?
+    private var dragStartOrigin: NSPoint?
+    private var cursorPushed = false
+    private(set) var naturalSize = NSSize.zero
+    private(set) var scale: CGFloat = 1
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        imageView.imageAlignment = .alignCenter
+        imageView.imageScaling = .scaleAxesIndependently
+        imageView.animates = true
+        imageView.isEditable = false
+        addSubview(imageView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func setImage(_ image: NSImage?, naturalSize: NSSize = .zero) {
+        imageView.image = image
+        self.naturalSize = naturalSize
+        needsLayout = true
+        window?.invalidateCursorRects(for: self)
+    }
+
+    func updateScale(_ scale: CGFloat, viewportSize: NSSize) {
+        self.scale = scale
+        let imageWidth = max(1, naturalSize.width * scale)
+        let imageHeight = max(1, naturalSize.height * scale)
+        let canvasWidth = max(viewportSize.width, imageWidth + 48)
+        let canvasHeight = max(viewportSize.height, imageHeight + 48)
+        frame = NSRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight)
+        imageView.frame = NSRect(
+            x: max(24, (canvasWidth - imageWidth) / 2),
+            y: max(24, (canvasHeight - imageHeight) / 2),
+            width: imageWidth,
+            height: imageHeight
+        )
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let scrollView = hostingScrollView else { return }
+        dragStartLocation = event.locationInWindow
+        dragStartOrigin = scrollView.contentView.bounds.origin
+        NSCursor.closedHand.push()
+        cursorPushed = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let scrollView = hostingScrollView,
+              let dragStartLocation,
+              let dragStartOrigin else { return }
+        let deltaX = event.locationInWindow.x - dragStartLocation.x
+        let deltaY = event.locationInWindow.y - dragStartLocation.y
+        let proposed = NSRect(
+            x: dragStartOrigin.x - deltaX,
+            y: dragStartOrigin.y + deltaY,
+            width: scrollView.contentView.bounds.width,
+            height: scrollView.contentView.bounds.height
+        )
+        let constrained = scrollView.contentView.constrainBoundsRect(proposed)
+        scrollView.contentView.scroll(to: constrained.origin)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragStartLocation = nil
+        dragStartOrigin = nil
+        if cursorPushed {
+            NSCursor.pop()
+            cursorPushed = false
+        }
+    }
+}
+
+private final class ImageScrollView: NSScrollView {
+    var onZoomStep: ((CGFloat) -> Void)?
+
+    override func scrollWheel(with event: NSEvent) {
+        guard abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX), event.scrollingDeltaY != 0 else {
+            super.scrollWheel(with: event)
+            return
+        }
+        onZoomStep?(event.scrollingDeltaY < 0 ? 1.12 : 1 / 1.12)
     }
 }
 
@@ -88,9 +213,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openDocument(_ sender: Any?) {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "md")!, .init(filenameExtension: "markdown")!, .plainText]
+        panel.title = "打开 Markdown 或图片"
+        panel.allowedContentTypes = (["md", "markdown", "png", "jpg", "jpeg", "webp", "gif", "bmp"]
+            .compactMap { UTType(filenameExtension: $0) }) + [.plainText]
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
+        panel.directoryURL = currentDocument?.fileURL?.deletingLastPathComponent()
         guard panel.runModal() == .OK else { return }
         panel.urls.forEach { showDocument(url: $0) }
     }
@@ -101,20 +229,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "打开文件夹"
+        panel.directoryURL = currentDocument?.fileURL?.deletingLastPathComponent()
         guard panel.runModal() == .OK, let directory = panel.url else { return }
         let files = ((try? FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
         )) ?? []).filter {
-            ["md", "markdown"].contains($0.pathExtension.lowercased())
+            (isMarkdownURL($0) || isImageURL($0))
+                && ((try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false)
         }.sorted {
             $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
         }
         guard let first = files.first else {
             let alert = NSAlert()
-            alert.messageText = "这个文件夹里没有 Markdown 文档"
-            alert.informativeText = "请选择包含 .md 或 .markdown 文件的文件夹。"
+            alert.messageText = "这个文件夹里没有可阅读文件"
+            alert.informativeText = "请选择第一层包含 Markdown、PNG、JPG、WebP、GIF 或 BMP 的文件夹。"
             alert.runModal()
             return
         }
@@ -130,6 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func zoomOut(_ sender: Any?) { currentDocument?.zoomOut(sender) }
     @objc private func zoomReset(_ sender: Any?) { currentDocument?.zoomReset(sender) }
     @objc private func toggleSidebar(_ sender: Any?) { currentDocument?.toggleSidebar(sender) }
+    @objc private func showDocumentFind(_ sender: Any?) { currentDocument?.showDocumentFind(sender) }
     @objc private func showMarkdownSyntax(_ sender: Any?) { currentDocument?.showSyntaxGuide(sender) }
     @objc private func copyMarkdownDocument(_ sender: Any?) { currentDocument?.copyMarkdownSource(sender) }
 
@@ -191,6 +322,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         copyMarkdown.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(.separator())
+        let findDocument = editMenu.addItem(withTitle: "查找正文…", action: #selector(showDocumentFind(_:)), keyEquivalent: "f")
+        findDocument.target = self
         editItem.submenu = editMenu
 
         let viewItem = NSMenuItem()
@@ -229,7 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let helpItem = NSMenuItem()
         main.addItem(helpItem)
         let helpMenu = NSMenu(title: "帮助")
-        let syntax = helpMenu.addItem(withTitle: "Markdown 语法速查（⌘F / ⌘/）", action: #selector(showMarkdownSyntax(_:)), keyEquivalent: "/")
+        let syntax = helpMenu.addItem(withTitle: "Markdown 语法速查（⌘/）", action: #selector(showMarkdownSyntax(_:)), keyEquivalent: "/")
         syntax.target = self
         syntax.keyEquivalentModifierMask = [.command]
         helpItem.submenu = helpMenu
@@ -242,10 +376,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 private final class DocumentWindow: NSWindow {
     weak var documentController: DocumentWindowController?
 
+    override func sendEvent(_ event: NSEvent) {
+        let refreshFind = event.type == .keyDown
+            && documentController?.shouldRefreshDocumentFind(after: event) == true
+        super.sendEvent(event)
+        if refreshFind {
+            DispatchQueue.main.async { [weak self] in
+                self?.documentController?.refreshDocumentFindAfterTyping()
+            }
+        }
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let key = event.charactersIgnoringModifiers?.lowercased()
-        if modifiers == [.command], key == "f" || key == "/" {
+        if modifiers == [.command], key == "f" {
+            documentController?.showDocumentFind(nil)
+            return true
+        }
+        if modifiers == [.command], key == "/" {
             documentController?.showSyntaxGuide(nil)
             return true
         }
@@ -269,6 +418,7 @@ private final class DocumentWindow: NSWindow {
 private final class FormattingTextView: NSTextView {
     var onMouseSelectionFinished: (() -> Void)?
     var onCancelFormatTool: (() -> Bool)?
+    var onQuickInsert: ((Int) -> Bool)?
 
     override func mouseUp(with event: NSEvent) {
         super.mouseUp(with: event)
@@ -277,60 +427,122 @@ private final class FormattingTextView: NSTextView {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53, onCancelFormatTool?() == true { return }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == [.option], event.keyCode == 18 || event.keyCode == 19,
+           onQuickInsert?(event.keyCode == 18 ? 1 : 2) == true { return }
         super.keyDown(with: event)
     }
 }
 
-private final class SyntaxGuideViewController: NSViewController, NSSearchFieldDelegate {
-    private let guideText: String
-    private let searchField = NSSearchField()
-    private let resultLabel = NSTextField(labelWithString: "")
-    private let guideView = NSTextView(frame: NSRect(x: 0, y: 0, width: 410, height: 2200))
-    private var matches: [NSRange] = []
-    private var currentMatch = 0
+private struct SyntaxTemplate {
+    let label: String
+    let text: String
+}
 
-    init(guideText: String) {
-        self.guideText = guideText
-        super.init(nibName: nil, bundle: nil)
+private struct SyntaxSection {
+    let title: String
+    let example: String
+    let details: String?
+    let templates: [SyntaxTemplate]
+    let wide: Bool
+}
+
+private final class SyntaxCopyButton: NSButton {
+    let templateText: String
+    let defaultTitle: String
+
+    init(template: SyntaxTemplate, target: AnyObject?, action: Selector?) {
+        templateText = template.text
+        defaultTitle = "复制\(template.label)"
+        super.init(frame: .zero)
+        title = defaultTitle
+        self.target = target
+        self.action = action
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+private final class SyntaxGuideViewController: NSViewController {
+    private let feedbackLabel = NSTextField(labelWithString: "点击按钮复制模板，回到正文按 ⌘V 粘贴")
+    private var firstCopyButton: NSButton?
+
+    private let sections: [SyntaxSection] = [
+        .init(title: "标题", example: "# 一级标题\n## 二级标题\n### 三级标题", details: nil, templates: [
+            .init(label: "一级标题", text: "# 标题"),
+            .init(label: "二级标题", text: "## 标题")
+        ], wide: false),
+        .init(title: "文字", example: "**粗体**\n*斜体*\n~~删除线~~\n`行内代码`", details: nil, templates: [
+            .init(label: "粗体", text: "**粗体文字**"),
+            .init(label: "斜体", text: "*斜体文字*"),
+            .init(label: "删除线", text: "~~删除线文字~~"),
+            .init(label: "行内代码", text: "`代码`")
+        ], wide: false),
+        .init(title: "黄色高光与红色文字", example: "<mark>需要高光的文字</mark>\n<span class=\"text-red\">红色文字</span>", details: "这是 LightMark 支持的安全内嵌 HTML 格式。", templates: [
+            .init(label: "黄色高光", text: "<mark>需要高光的文字</mark>"),
+            .init(label: "红色文字", text: "<span class=\"text-red\">红色文字</span>")
+        ], wide: false),
+        .init(title: "段落、换行与段首", example: "&emsp;&emsp;中文段首\n<br>\n<br><br>", details: "正文编辑栏也提供 &emsp;&emsp; 与 <br><br> 两个常用按钮。", templates: [
+            .init(label: "段首缩进", text: "&emsp;&emsp;"),
+            .init(label: "换行", text: "<br>"),
+            .init(label: "空一行", text: "<br><br>"),
+            .init(label: "全角空格", text: "　　")
+        ], wide: false),
+        .init(title: "列表与任务", example: "- 无序列表\n1. 有序列表\n- [ ] 待完成\n- [x] 已完成", details: nil, templates: [
+            .init(label: "无序列表", text: "- 第一项\n- 第二项"),
+            .init(label: "有序列表", text: "1. 第一项\n2. 第二项"),
+            .init(label: "任务列表", text: "- [ ] 待完成\n- [x] 已完成")
+        ], wide: false),
+        .init(title: "引用与分隔线", example: "> 引用内容\n\n---", details: nil, templates: [
+            .init(label: "引用", text: "> 引用内容"),
+            .init(label: "分隔线", text: "---")
+        ], wide: false),
+        .init(title: "链接与图片", example: "[显示文字](https://example.com)\n![图片说明](images/photo.png)", details: nil, templates: [
+            .init(label: "链接", text: "[显示文字](https://example.com)"),
+            .init(label: "图片", text: "![图片说明](images/photo.png)")
+        ], wide: false),
+        .init(title: "Obsidian 图片与 Wiki Link", example: "![[asset/图片.png|480]]\n[[文档名称|显示文字]]", details: "竖线后的数字是图片显示宽度。", templates: [
+            .init(label: "Obsidian 图片", text: "![[asset/图片.png]]"),
+            .init(label: "指定宽度图片", text: "![[asset/图片.png|480]]"),
+            .init(label: "Wiki Link", text: "[[文档名称]]"),
+            .init(label: "带别名链接", text: "[[文档名称|显示文字]]")
+        ], wide: false),
+        .init(title: "代码块", example: "```swift\nlet message = \"Hello\"\n```", details: nil, templates: [
+            .init(label: "代码块", text: "```swift\nlet message = \"Hello\"\n```")
+        ], wide: false),
+        .init(title: "表格", example: "| 名称 | 数值 |\n| --- | ---: |\n| 示例 | 100 |", details: nil, templates: [
+            .init(label: "表格", text: "| 名称 | 数值 |\n| --- | ---: |\n| 示例 | 100 |")
+        ], wide: false),
+        .init(title: "Obsidian Callout", example: "> [!note] 自定义标题\n> 这里是内容\n\n> [!faq]- 默认收起\n> 收起的内容\n\n> [!tip]+ 默认展开\n> 展开的内容", details: "支持 note、abstract/summary/tldr、info、todo、tip/hint/important、success/check/done、question/help/faq、warning/caution/attention、failure/fail/missing、danger/error、bug、example、quote/cite，以及多层嵌套。", templates: [
+            .init(label: "基础 Callout", text: "> [!note] 自定义标题\n> 这里是内容"),
+            .init(label: "默认收起", text: "> [!faq]- 默认收起\n> 收起的内容"),
+            .init(label: "默认展开", text: "> [!tip]+ 默认展开\n> 展开的内容"),
+            .init(label: "多层嵌套", text: "> [!question] 可以嵌套吗？\n> > [!todo] 可以\n> > > [!example] 支持多层")
+        ], wide: true),
+        .init(title: "Frontmatter", example: "---\ntitle: 文档标题\ntags: [示例]\n---", details: nil, templates: [
+            .init(label: "Frontmatter", text: "---\ntitle: 文档标题\ntags: [示例]\n---")
+        ], wide: true)
+    ]
+
+    init() {
+        super.init(nibName: nil, bundle: nil)
+    }
 
     override func loadView() {
-        let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 450, height: 570))
+        let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 680, height: 650))
         root.material = .popover
         root.state = .active
 
         let heading = NSTextField(labelWithString: "Markdown 语法速查")
-        heading.font = .systemFont(ofSize: 16, weight: .semibold)
+        heading.font = .systemFont(ofSize: 17, weight: .semibold)
         heading.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(heading)
 
-        searchField.placeholderString = "搜索语法，例如 Callout、折叠、图片"
-        searchField.sendsSearchStringImmediately = true
-        searchField.delegate = self
-        searchField.target = self
-        searchField.action = #selector(searchSubmitted(_:))
-        searchField.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(searchField)
-
-        resultLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        resultLabel.textColor = .secondaryLabelColor
-        resultLabel.alignment = .right
-        resultLabel.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(resultLabel)
-
-        let previous = NSButton(title: "‹", target: self, action: #selector(previousResult(_:)))
-        previous.bezelStyle = .inline
-        previous.toolTip = "上一个结果（Shift+Enter）"
-        previous.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(previous)
-
-        let next = NSButton(title: "›", target: self, action: #selector(nextResult(_:)))
-        next.bezelStyle = .inline
-        next.toolTip = "下一个结果（Enter）"
-        next.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(next)
+        feedbackLabel.font = .systemFont(ofSize: 11.5)
+        feedbackLabel.textColor = .secondaryLabelColor
+        feedbackLabel.lineBreakMode = .byTruncatingTail
+        feedbackLabel.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(feedbackLabel)
 
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
@@ -339,135 +551,185 @@ private final class SyntaxGuideViewController: NSViewController, NSSearchFieldDe
         scroll.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(scroll)
 
-        guideView.isEditable = false
-        guideView.isSelectable = true
-        guideView.drawsBackground = false
-        guideView.font = .monospacedSystemFont(ofSize: 12.5, weight: .regular)
-        guideView.textColor = .labelColor
-        guideView.textContainerInset = NSSize(width: 8, height: 8)
-        guideView.autoresizingMask = [.width]
-        guideView.minSize = NSSize(width: 0, height: 0)
-        guideView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        guideView.isVerticallyResizable = true
-        guideView.isHorizontallyResizable = false
-        guideView.textContainer?.widthTracksTextView = true
-        guideView.textContainer?.containerSize = NSSize(width: 414, height: CGFloat.greatestFiniteMagnitude)
-        guideView.string = guideText
-        scroll.documentView = guideView
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = content
+
+        let rows = NSStackView()
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.distribution = .fill
+        rows.spacing = 11
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(rows)
+
+        func appendRow(_ cards: [NSView]) {
+            let row = makeRow(cards)
+            rows.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+        }
+
+        var pendingCard: NSView?
+        for section in sections {
+            let card = makeCard(section)
+            if section.wide {
+                if let queuedCard = pendingCard {
+                    appendRow([queuedCard])
+                }
+                pendingCard = nil
+                appendRow([card])
+            } else if let queuedCard = pendingCard {
+                appendRow([queuedCard, card])
+                pendingCard = nil
+            } else {
+                pendingCard = card
+            }
+        }
+        if let queuedCard = pendingCard { appendRow([queuedCard]) }
 
         NSLayoutConstraint.activate([
             heading.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
-            heading.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
             heading.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
-            searchField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
-            searchField.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 12),
-            searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 250),
-            resultLabel.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: 8),
-            resultLabel.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            resultLabel.widthAnchor.constraint(equalToConstant: 45),
-            previous.leadingAnchor.constraint(equalTo: resultLabel.trailingAnchor, constant: 3),
-            previous.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            previous.widthAnchor.constraint(equalToConstant: 25),
-            next.leadingAnchor.constraint(equalTo: previous.trailingAnchor, constant: 1),
-            next.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            next.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            next.widthAnchor.constraint(equalToConstant: 25),
+            feedbackLabel.leadingAnchor.constraint(equalTo: heading.trailingAnchor, constant: 12),
+            feedbackLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            feedbackLabel.centerYAnchor.constraint(equalTo: heading.centerYAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
-            scroll.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 10),
-            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10)
+            scroll.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 12),
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
+            content.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            content.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            content.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            rows.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
+            rows.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
+            rows.topAnchor.constraint(equalTo: content.topAnchor, constant: 4),
+            rows.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8)
         ])
 
         view = root
     }
 
-    func focusSearch() {
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func focusFirstAction() {
         _ = view
-        view.window?.makeFirstResponder(searchField)
+        view.window?.makeFirstResponder(firstCopyButton)
     }
 
-    func controlTextDidChange(_ obj: Notification) {
-        rebuildMatches()
+    private func makeRow(_ cards: [NSView]) -> NSStackView {
+        let row = NSStackView(views: cards)
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.distribution = .fillEqually
+        row.spacing = 11
+        return row
     }
 
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if commandSelector == #selector(NSResponder.cancelOperation(_:)), !searchField.stringValue.isEmpty {
-            searchField.stringValue = ""
-            rebuildMatches()
-            return true
+    private func makeCard(_ section: SyntaxSection) -> NSView {
+        let card = NSBox()
+        card.boxType = .custom
+        card.borderWidth = 1
+        card.borderColor = .separatorColor
+        card.fillColor = .controlBackgroundColor
+        card.cornerRadius = 10
+        card.contentViewMargins = NSSize(width: 13, height: 12)
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.contentView?.addSubview(stack)
+
+        let title = NSTextField(labelWithString: section.title)
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = .controlAccentColor
+        stack.addArrangedSubview(title)
+
+        let example = NSTextField(wrappingLabelWithString: section.example)
+        example.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        example.textColor = .labelColor
+        example.isSelectable = true
+        example.maximumNumberOfLines = 0
+        example.lineBreakMode = .byWordWrapping
+        example.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        stack.addArrangedSubview(example)
+        example.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        if let details = section.details {
+            let note = NSTextField(wrappingLabelWithString: details)
+            note.font = .systemFont(ofSize: 10.5)
+            note.textColor = .secondaryLabelColor
+            note.maximumNumberOfLines = 0
+            note.lineBreakMode = .byWordWrapping
+            note.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            stack.addArrangedSubview(note)
+            note.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
-        return false
+
+        let buttonRows = NSStackView()
+        buttonRows.orientation = .vertical
+        buttonRows.alignment = .leading
+        buttonRows.spacing = 5
+        for start in stride(from: 0, to: section.templates.count, by: 2) {
+            let templates = Array(section.templates[start..<min(start + 2, section.templates.count)])
+            let buttons = templates.map { template -> NSButton in
+                let button = SyntaxCopyButton(template: template, target: self, action: #selector(copyTemplate(_:)))
+                button.bezelStyle = .rounded
+                button.controlSize = .small
+                button.font = .systemFont(ofSize: 10.5, weight: .medium)
+                if firstCopyButton == nil { firstCopyButton = button }
+                return button
+            }
+            let row = NSStackView(views: buttons)
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 5
+            buttonRows.addArrangedSubview(row)
+        }
+        stack.addArrangedSubview(buttonRows)
+
+        if let contentView = card.contentView {
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+                stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+                stack.topAnchor.constraint(equalTo: contentView.topAnchor),
+                stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
+            ])
+        }
+        return card
     }
 
-    @objc private func searchSubmitted(_ sender: Any?) {
-        let backwards = NSApp.currentEvent?.modifierFlags.contains(.shift) == true
-        moveResult(by: backwards ? -1 : 1)
-    }
-
-    @objc private func previousResult(_ sender: Any?) { moveResult(by: -1) }
-    @objc private func nextResult(_ sender: Any?) { moveResult(by: 1) }
-
-    private func rebuildMatches() {
-        guard let storage = guideView.textStorage else { return }
-        let fullRange = NSRange(location: 0, length: storage.length)
-        storage.removeAttribute(.backgroundColor, range: fullRange)
-        matches.removeAll()
-        currentMatch = 0
-
-        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
-            resultLabel.stringValue = ""
+    @objc private func copyTemplate(_ sender: SyntaxCopyButton) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.setString(sender.templateText, forType: .string) else {
+            feedbackLabel.stringValue = "复制失败，请重试"
             return
         }
-
-        let source = storage.string as NSString
-        var searchRange = NSRange(location: 0, length: source.length)
-        while searchRange.length > 0 {
-            let found = source.range(of: query, options: [.caseInsensitive, .diacriticInsensitive], range: searchRange)
-            guard found.location != NSNotFound else { break }
-            matches.append(found)
-            let nextLocation = found.location + max(found.length, 1)
-            guard nextLocation <= source.length else { break }
-            searchRange = NSRange(location: nextLocation, length: source.length - nextLocation)
+        sender.title = "已复制"
+        sender.contentTintColor = .systemGreen
+        feedbackLabel.stringValue = "已复制 \(sender.defaultTitle.dropFirst(2))，回正文按 ⌘V 粘贴"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { [weak sender] in
+            guard let sender else { return }
+            sender.title = sender.defaultTitle
+            sender.contentTintColor = nil
         }
-
-        for range in matches {
-            storage.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.58), range: range)
-        }
-        showCurrentMatch()
-    }
-
-    private func moveResult(by offset: Int) {
-        guard !matches.isEmpty else { return }
-        currentMatch = (currentMatch + offset + matches.count) % matches.count
-        showCurrentMatch()
-    }
-
-    private func showCurrentMatch() {
-        guard let storage = guideView.textStorage else { return }
-        for range in matches {
-            storage.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.58), range: range)
-        }
-        guard !matches.isEmpty else {
-            resultLabel.stringValue = "0 / 0"
-            return
-        }
-        let active = matches[currentMatch]
-        storage.addAttribute(.backgroundColor, value: NSColor.systemOrange.withAlphaComponent(0.86), range: active)
-        guideView.scrollRangeToVisible(active)
-        resultLabel.stringValue = "\(currentMatch + 1) / \(matches.count)"
     }
 }
 
-final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, WKNavigationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate {
+final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, NSSearchFieldDelegate, WKNavigationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate {
     var onClose: (() -> Void)?
     private(set) var fileURL: URL?
     private var lastSavedText = ""
     private var renderWorkItem: DispatchWorkItem?
     private var webReady = false
     private var fontScale = 1.0
+    private var currentContentKind = ContentKind.markdown
     private var currentMode = ViewMode.reading
-    private var siblingURLs: [URL] = []
+    private var documentURLs: [URL] = []
+    private var imageURLs: [URL] = []
     private var documentHeadings: [DocumentHeading] = []
     private var sidebarMode = SidebarMode.documents
     private var sidebarVisible = false
@@ -476,6 +738,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private var syntaxPopover: NSPopover?
     private var syntaxGuideController: SyntaxGuideViewController?
     private var copyFeedbackWorkItem: DispatchWorkItem?
+    private var documentFindMatches: [NSRange] = []
+    private var documentFindIndex = 0
+    private var documentFindCount = 0
+    private var documentFindGeneration = 0
+    private var findBarHeightConstraint: NSLayoutConstraint!
     private var activeFormatTool: InlineFormatTool?
     private var isApplyingSplitLayout = false
     private var editorOnRight = UserDefaults.standard.bool(forKey: "LightMarkEditorOnRight")
@@ -487,6 +754,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         let stored = UserDefaults.standard.double(forKey: "LightMarkSidebarWidth")
         return stored >= 170 && stored <= 310 ? CGFloat(stored) : 220
     }()
+    private var imageZoomMode: ImageZoomMode = {
+        guard let raw = UserDefaults.standard.string(forKey: "LightMarkImageZoomMode"),
+              let mode = ImageZoomMode(rawValue: raw) else { return .fit }
+        return mode
+    }()
+    private var imageScale: CGFloat = {
+        let stored = UserDefaults.standard.double(forKey: "LightMarkImageZoomScale")
+        return stored >= 0.05 && stored <= 8 ? CGFloat(stored) : 1
+    }()
 
     private let sidebarToggleButton = NSButton(title: "☰", target: nil, action: nil)
     private let modeControl = NSSegmentedControl(labels: ["阅读", "编辑", "分栏"], trackingMode: .selectOne, target: nil, action: nil)
@@ -494,6 +770,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let copyButton = NSButton(title: "", target: nil, action: nil)
     private let titleLabel = NSTextField(labelWithString: "未命名")
     private let statusLabel = NSTextField(labelWithString: "")
+    private let findBar = NSVisualEffectView()
+    private let findField = NSSearchField()
+    private let findCountLabel = NSTextField(labelWithString: "0 / 0")
+    private let findPreviousButton = NSButton(title: "↑", target: nil, action: nil)
+    private let findNextButton = NSButton(title: "↓", target: nil, action: nil)
+    private let findCloseButton = NSButton(title: "×", target: nil, action: nil)
     private let previousButton = NSButton(title: "‹", target: nil, action: nil)
     private let nextButton = NSButton(title: "›", target: nil, action: nil)
     private let positionLabel = NSTextField(labelWithString: "")
@@ -502,14 +784,28 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let formattingHint = NSTextField(labelWithString: "先选中文字再点按钮，或先开启画笔再拖选")
     private let highlightButton = NSButton(title: "黄色高光", target: nil, action: nil)
     private let redTextButton = NSButton(title: "红色笔", target: nil, action: nil)
+    private let indentInsertButton = NSButton(title: "&emsp;&emsp;  ⌥1", target: nil, action: nil)
+    private let blankBreakInsertButton = NSButton(title: "<br><br>  ⌥2", target: nil, action: nil)
     private let paneSwapButton = NSButton(title: "⇄ 换边", target: nil, action: nil)
     private let editor = FormattingTextView()
     private let editorScroll = NSScrollView()
     private let webView: WKWebView
     private let splitView = NSSplitView()
+    private let contentHost = NSView()
+    private let imageViewer = NSView()
+    private let imageToolbar = NSVisualEffectView()
+    private let imageZoomOutButton = NSButton(title: "−", target: nil, action: nil)
+    private let imageZoomLabel = NSTextField(labelWithString: "适合")
+    private let imageZoomInButton = NSButton(title: "+", target: nil, action: nil)
+    private let imageFitButton = NSButton(title: "适合窗口", target: nil, action: nil)
+    private let imageActualButton = NSButton(title: "原始大小", target: nil, action: nil)
+    private let imageGestureHint = NSTextField(labelWithString: "滚轮缩放 · 拖动查看大图")
+    private let imageDetailsLabel = NSTextField(labelWithString: "")
+    private let imageScroll = ImageScrollView()
+    private let imageCanvas = ImageCanvasView()
     private let documentAreaSplitView = NSSplitView()
     private let sidebarContainer = NSVisualEffectView()
-    private let sidebarModeControl = NSSegmentedControl(labels: ["文档", "本文目录"], trackingMode: .selectOne, target: nil, action: nil)
+    private let sidebarModeControl = NSSegmentedControl(labels: ["图片", "文档", "本文目录"], trackingMode: .selectOne, target: nil, action: nil)
     private let sidebarScroll = NSScrollView()
     private let sidebarTable = NSTableView()
 
@@ -541,7 +837,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
-    private var hasUnsavedChanges: Bool { editor.string != lastSavedText }
+    private var hasUnsavedChanges: Bool {
+        currentContentKind == .markdown && editor.string != lastSavedText
+    }
     private static let outlineFenceRegex = try! NSRegularExpression(pattern: #"^ {0,3}(`{3,}|~{3,})"#)
     private static let outlineHeadingRegex = try! NSRegularExpression(pattern: #"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$"#)
     private static let outlineSetextRegex = try! NSRegularExpression(pattern: #"^ {0,3}(=+|-+)[ \t]*$"#)
@@ -583,7 +881,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         syntaxButton.font = .systemFont(ofSize: 12, weight: .medium)
         syntaxButton.target = self
         syntaxButton.action = #selector(showSyntaxGuide(_:))
-        syntaxButton.toolTip = "Markdown 语法速查（⌘F 或 ⌘/）"
+        syntaxButton.toolTip = "Markdown 语法卡片（⌘/）"
         syntaxButton.translatesAutoresizingMaskIntoConstraints = false
         topBar.addSubview(syntaxButton)
 
@@ -631,6 +929,49 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         statusLabel.alignment = .right
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         topBar.addSubview(statusLabel)
+
+        findBar.material = .contentBackground
+        findBar.blendingMode = .withinWindow
+        findBar.state = .active
+        findBar.isHidden = true
+        findBar.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(findBar)
+
+        let findTitle = NSTextField(labelWithString: "查找正文")
+        findTitle.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        findTitle.textColor = .secondaryLabelColor
+        findTitle.translatesAutoresizingMaskIntoConstraints = false
+        findBar.addSubview(findTitle)
+
+        findField.placeholderString = "输入要查找的文字"
+        findField.sendsSearchStringImmediately = true
+        findField.delegate = self
+        findField.target = self
+        findField.action = #selector(findChanged(_:))
+        findField.translatesAutoresizingMaskIntoConstraints = false
+        findBar.addSubview(findField)
+
+        findCountLabel.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        findCountLabel.textColor = .secondaryLabelColor
+        findCountLabel.alignment = .center
+        findCountLabel.translatesAutoresizingMaskIntoConstraints = false
+        findBar.addSubview(findCountLabel)
+
+        for button in [findPreviousButton, findNextButton, findCloseButton] {
+            button.bezelStyle = .inline
+            button.font = .systemFont(ofSize: 12, weight: .medium)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            findBar.addSubview(button)
+        }
+        findPreviousButton.target = self
+        findPreviousButton.action = #selector(findPrevious(_:))
+        findPreviousButton.toolTip = "上一个（Shift+Enter）"
+        findNextButton.target = self
+        findNextButton.action = #selector(findNext(_:))
+        findNextButton.toolTip = "下一个（Enter）"
+        findCloseButton.target = self
+        findCloseButton.action = #selector(closeDocumentFind(_:))
+        findCloseButton.toolTip = "关闭查找（Esc）"
 
         splitView.isVertical = true
         splitView.dividerStyle = .thin
@@ -684,7 +1025,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         ])
 
         documentAreaSplitView.addArrangedSubview(sidebarContainer)
-        documentAreaSplitView.addArrangedSubview(splitView)
+        documentAreaSplitView.addArrangedSubview(contentHost)
 
         editorContainer.translatesAutoresizingMaskIntoConstraints = false
         formattingBar.material = .contentBackground
@@ -717,6 +1058,20 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             redTextButton.image = image
             redTextButton.imagePosition = .imageLeading
         }
+
+        for button in [indentInsertButton, blankBreakInsertButton] {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.font = .monospacedSystemFont(ofSize: 10.5, weight: .medium)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            formattingBar.addSubview(button)
+        }
+        indentInsertButton.target = self
+        indentInsertButton.action = #selector(insertIndentSyntax(_:))
+        indentInsertButton.toolTip = "在光标处插入 &emsp;&emsp;（⌥1）"
+        blankBreakInsertButton.target = self
+        blankBreakInsertButton.action = #selector(insertBlankBreakSyntax(_:))
+        blankBreakInsertButton.toolTip = "在光标处插入 <br><br>（⌥2）"
 
         paneSwapButton.bezelStyle = .rounded
         paneSwapButton.controlSize = .small
@@ -755,6 +1110,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             self.setActiveFormatTool(nil)
             return true
         }
+        editor.onQuickInsert = { [weak self] number in
+            self?.insertQuickSyntax(number == 1 ? "&emsp;&emsp;" : "<br><br>") ?? false
+        }
         editorScroll.translatesAutoresizingMaskIntoConstraints = false
         editorScroll.documentView = editor
         editorScroll.hasVerticalScroller = true
@@ -770,6 +1128,76 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         webView.navigationDelegate = self
         webView.setValue(false, forKey: "drawsBackground")
+        splitView.translatesAutoresizingMaskIntoConstraints = false
+        contentHost.addSubview(splitView)
+
+        imageViewer.translatesAutoresizingMaskIntoConstraints = false
+        imageViewer.isHidden = true
+        contentHost.addSubview(imageViewer)
+
+        imageToolbar.material = .contentBackground
+        imageToolbar.blendingMode = .withinWindow
+        imageToolbar.state = .active
+        imageToolbar.translatesAutoresizingMaskIntoConstraints = false
+        imageViewer.addSubview(imageToolbar)
+
+        for button in [imageZoomOutButton, imageZoomInButton, imageFitButton, imageActualButton] {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.font = .systemFont(ofSize: 11.5, weight: .medium)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            imageToolbar.addSubview(button)
+        }
+        imageZoomOutButton.target = self
+        imageZoomOutButton.action = #selector(zoomImageOut(_:))
+        imageZoomOutButton.toolTip = "缩小图片（⌘− 或滚轮向下）"
+        imageZoomOutButton.setAccessibilityLabel("缩小图片")
+        imageZoomInButton.target = self
+        imageZoomInButton.action = #selector(zoomImageIn(_:))
+        imageZoomInButton.toolTip = "放大图片（⌘+ 或滚轮向上）"
+        imageZoomInButton.setAccessibilityLabel("放大图片")
+        imageFitButton.target = self
+        imageFitButton.action = #selector(fitImageToWindow(_:))
+        imageFitButton.setButtonType(.toggle)
+        imageFitButton.toolTip = "让整张图片适合当前窗口"
+        imageFitButton.setAccessibilityLabel("适合窗口")
+        imageActualButton.target = self
+        imageActualButton.action = #selector(showImageAtActualSize(_:))
+        imageActualButton.setButtonType(.toggle)
+        imageActualButton.toolTip = "以图片原始像素尺寸显示"
+        imageActualButton.setAccessibilityLabel("原始大小")
+
+        imageZoomLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        imageZoomLabel.alignment = .center
+        imageZoomLabel.translatesAutoresizingMaskIntoConstraints = false
+        imageZoomLabel.setAccessibilityLabel("图片缩放比例")
+        imageToolbar.addSubview(imageZoomLabel)
+
+        imageGestureHint.font = .systemFont(ofSize: 10.5)
+        imageGestureHint.textColor = .secondaryLabelColor
+        imageGestureHint.lineBreakMode = .byTruncatingTail
+        imageGestureHint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        imageGestureHint.translatesAutoresizingMaskIntoConstraints = false
+        imageToolbar.addSubview(imageGestureHint)
+
+        imageDetailsLabel.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        imageDetailsLabel.textColor = .secondaryLabelColor
+        imageDetailsLabel.alignment = .right
+        imageDetailsLabel.lineBreakMode = .byTruncatingHead
+        imageDetailsLabel.translatesAutoresizingMaskIntoConstraints = false
+        imageToolbar.addSubview(imageDetailsLabel)
+
+        imageScroll.hasHorizontalScroller = true
+        imageScroll.hasVerticalScroller = true
+        imageScroll.autohidesScrollers = true
+        imageScroll.drawsBackground = true
+        imageScroll.backgroundColor = .textBackgroundColor
+        imageScroll.translatesAutoresizingMaskIntoConstraints = false
+        imageScroll.documentView = imageCanvas
+        imageScroll.onZoomStep = { [weak self] factor in self?.zoomImage(by: factor) }
+        imageCanvas.hostingScrollView = imageScroll
+        imageViewer.addSubview(imageScroll)
+
         splitView.addArrangedSubview(editorContainer)
         splitView.addArrangedSubview(webView)
         applyPaneOrder()
@@ -816,6 +1244,27 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             previousButton.centerYAnchor.constraint(equalTo: modeControl.centerYAnchor),
             previousButton.widthAnchor.constraint(equalToConstant: 26),
             previousButton.heightAnchor.constraint(equalToConstant: 28),
+            findBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            findBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            findBar.topAnchor.constraint(equalTo: topBar.bottomAnchor),
+            findTitle.leadingAnchor.constraint(equalTo: findBar.leadingAnchor, constant: 14),
+            findTitle.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+            findField.leadingAnchor.constraint(equalTo: findTitle.trailingAnchor, constant: 10),
+            findField.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+            findField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
+            findCountLabel.leadingAnchor.constraint(equalTo: findField.trailingAnchor, constant: 8),
+            findCountLabel.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+            findCountLabel.widthAnchor.constraint(equalToConstant: 54),
+            findPreviousButton.leadingAnchor.constraint(equalTo: findCountLabel.trailingAnchor, constant: 2),
+            findPreviousButton.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+            findPreviousButton.widthAnchor.constraint(equalToConstant: 28),
+            findNextButton.leadingAnchor.constraint(equalTo: findPreviousButton.trailingAnchor, constant: 2),
+            findNextButton.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+            findNextButton.widthAnchor.constraint(equalToConstant: 28),
+            findCloseButton.leadingAnchor.constraint(equalTo: findNextButton.trailingAnchor, constant: 2),
+            findCloseButton.trailingAnchor.constraint(equalTo: findBar.trailingAnchor, constant: -12),
+            findCloseButton.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+            findCloseButton.widthAnchor.constraint(equalToConstant: 28),
             formattingBar.leadingAnchor.constraint(equalTo: editorContainer.leadingAnchor),
             formattingBar.trailingAnchor.constraint(equalTo: editorContainer.trailingAnchor),
             formattingBar.topAnchor.constraint(equalTo: editorContainer.topAnchor),
@@ -824,7 +1273,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             highlightButton.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
             redTextButton.leadingAnchor.constraint(equalTo: highlightButton.trailingAnchor, constant: 6),
             redTextButton.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
-            formattingHint.leadingAnchor.constraint(equalTo: redTextButton.trailingAnchor, constant: 10),
+            indentInsertButton.leadingAnchor.constraint(equalTo: redTextButton.trailingAnchor, constant: 9),
+            indentInsertButton.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
+            indentInsertButton.widthAnchor.constraint(equalToConstant: 112),
+            blankBreakInsertButton.leadingAnchor.constraint(equalTo: indentInsertButton.trailingAnchor, constant: 5),
+            blankBreakInsertButton.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
+            blankBreakInsertButton.widthAnchor.constraint(equalToConstant: 96),
+            formattingHint.leadingAnchor.constraint(equalTo: blankBreakInsertButton.trailingAnchor, constant: 8),
             formattingHint.trailingAnchor.constraint(lessThanOrEqualTo: paneSwapButton.leadingAnchor, constant: -8),
             formattingHint.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
             paneSwapButton.trailingAnchor.constraint(equalTo: formattingBar.trailingAnchor, constant: -10),
@@ -833,11 +1288,49 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             editorScroll.trailingAnchor.constraint(equalTo: editorContainer.trailingAnchor),
             editorScroll.topAnchor.constraint(equalTo: formattingBar.bottomAnchor),
             editorScroll.bottomAnchor.constraint(equalTo: editorContainer.bottomAnchor),
+            splitView.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
+            splitView.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor),
+            splitView.topAnchor.constraint(equalTo: contentHost.topAnchor),
+            splitView.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor),
+            imageViewer.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
+            imageViewer.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor),
+            imageViewer.topAnchor.constraint(equalTo: contentHost.topAnchor),
+            imageViewer.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor),
+            imageToolbar.leadingAnchor.constraint(equalTo: imageViewer.leadingAnchor),
+            imageToolbar.trailingAnchor.constraint(equalTo: imageViewer.trailingAnchor),
+            imageToolbar.topAnchor.constraint(equalTo: imageViewer.topAnchor),
+            imageToolbar.heightAnchor.constraint(equalToConstant: 44),
+            imageZoomOutButton.leadingAnchor.constraint(equalTo: imageToolbar.leadingAnchor, constant: 12),
+            imageZoomOutButton.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageZoomOutButton.widthAnchor.constraint(equalToConstant: 32),
+            imageZoomLabel.leadingAnchor.constraint(equalTo: imageZoomOutButton.trailingAnchor, constant: 4),
+            imageZoomLabel.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageZoomLabel.widthAnchor.constraint(equalToConstant: 72),
+            imageZoomInButton.leadingAnchor.constraint(equalTo: imageZoomLabel.trailingAnchor, constant: 4),
+            imageZoomInButton.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageZoomInButton.widthAnchor.constraint(equalToConstant: 32),
+            imageFitButton.leadingAnchor.constraint(equalTo: imageZoomInButton.trailingAnchor, constant: 10),
+            imageFitButton.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageActualButton.leadingAnchor.constraint(equalTo: imageFitButton.trailingAnchor, constant: 6),
+            imageActualButton.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageGestureHint.leadingAnchor.constraint(equalTo: imageActualButton.trailingAnchor, constant: 12),
+            imageGestureHint.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageGestureHint.trailingAnchor.constraint(lessThanOrEqualTo: imageDetailsLabel.leadingAnchor, constant: -8),
+            imageDetailsLabel.trailingAnchor.constraint(equalTo: imageToolbar.trailingAnchor, constant: -14),
+            imageDetailsLabel.centerYAnchor.constraint(equalTo: imageToolbar.centerYAnchor),
+            imageDetailsLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 250),
+            imageScroll.leadingAnchor.constraint(equalTo: imageViewer.leadingAnchor),
+            imageScroll.trailingAnchor.constraint(equalTo: imageViewer.trailingAnchor),
+            imageScroll.topAnchor.constraint(equalTo: imageToolbar.bottomAnchor),
+            imageScroll.bottomAnchor.constraint(equalTo: imageViewer.bottomAnchor),
             documentAreaSplitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             documentAreaSplitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            documentAreaSplitView.topAnchor.constraint(equalTo: topBar.bottomAnchor),
+            documentAreaSplitView.topAnchor.constraint(equalTo: findBar.bottomAnchor),
             documentAreaSplitView.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
+
+        findBarHeightConstraint = findBar.heightAnchor.constraint(equalToConstant: 0)
+        findBarHeightConstraint.isActive = true
 
         editorContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         webView.widthAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
@@ -846,6 +1339,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     private func load(_ url: URL?) {
+        if let url, isImageURL(url) {
+            loadImage(url)
+            return
+        }
+
         let text: String
         if let url {
             do {
@@ -859,19 +1357,102 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             text = "# 欢迎使用轻阅 Markdown\n\n把 `.md` 文件拖到窗口，或按 **⌘O** 打开。\n\n> [!note] Obsidian Callout\n> Note、Tip、Warning 等 Callout 会按卡片正常显示。\n\n切换到「编辑」或「分栏」即可修改内容，按 **⌘S** 保存。"
             statusLabel.stringValue = "拖入文件即可阅读"
         }
+        currentContentKind = .markdown
         editor.string = text
+        imageCanvas.setImage(nil)
         refreshDocumentOutline()
         setActiveFormatTool(nil)
         lastSavedText = text
+        applyContentKind(.markdown)
         updateTitle()
         refreshSiblingDocuments()
         loadPreviewShell()
     }
 
-    private func replaceDocument(with url: URL) {
-        guard ["md", "markdown", "txt"].contains(url.pathExtension.lowercased()) else {
+    private func loadImage(_ url: URL) {
+        guard let image = NSImage(contentsOf: url) else {
             NSSound.beep()
-            statusLabel.stringValue = "仅支持 Markdown 文本"
+            statusLabel.stringValue = "图片打开失败"
+            let alert = NSAlert()
+            alert.messageText = "无法显示这张图片"
+            alert.informativeText = "系统无法解码 \(url.lastPathComponent)。"
+            alert.runModal()
+            return
+        }
+
+        currentContentKind = .image
+        editor.string = ""
+        lastSavedText = ""
+        documentHeadings = []
+        setActiveFormatTool(nil)
+        let naturalSize = imagePixelSize(image)
+        imageCanvas.setImage(image, naturalSize: naturalSize)
+        applyContentKind(.image)
+        updateTitle()
+        refreshSiblingDocuments()
+        updateImageDetails(url: url, naturalSize: naturalSize)
+        statusLabel.stringValue = "已打开图片"
+        DispatchQueue.main.async { [weak self] in
+            self?.applyImageZoomPreference(alignTop: true)
+            self?.window?.makeFirstResponder(self?.imageScroll)
+        }
+    }
+
+    private func imagePixelSize(_ image: NSImage) -> NSSize {
+        let representation = image.representations.max {
+            $0.pixelsWide * $0.pixelsHigh < $1.pixelsWide * $1.pixelsHigh
+        }
+        if let representation, representation.pixelsWide > 0, representation.pixelsHigh > 0 {
+            return NSSize(width: representation.pixelsWide, height: representation.pixelsHigh)
+        }
+        return image.size
+    }
+
+    private func updateImageDetails(url: URL, naturalSize: NSSize) {
+        let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let sizeText: String
+        if bytes < 1024 {
+            sizeText = "\(bytes) B"
+        } else if bytes < 1024 * 1024 {
+            sizeText = String(format: bytes < 10 * 1024 ? "%.1f KB" : "%.0f KB", Double(bytes) / 1024)
+        } else {
+            sizeText = String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
+        }
+        let type = url.pathExtension.lowercased() == "jpeg" ? "JPG" : url.pathExtension.uppercased()
+        imageDetailsLabel.stringValue = "\(Int(naturalSize.width)) × \(Int(naturalSize.height)) · \(sizeText) · \(type)"
+    }
+
+    private func applyContentKind(_ kind: ContentKind) {
+        currentContentKind = kind
+        let imageMode = kind == .image
+        splitView.isHidden = imageMode
+        imageViewer.isHidden = !imageMode
+        modeControl.isEnabled = !imageMode
+        syntaxButton.isEnabled = !imageMode
+        copyButton.isEnabled = !imageMode
+        sidebarModeControl.setEnabled(!imageMode, forSegment: SidebarMode.outline.rawValue)
+        previousButton.toolTip = imageMode ? "上一张（按 ←）" : "上一篇（阅读模式按 ←）"
+        previousButton.setAccessibilityLabel(imageMode ? "上一张" : "上一篇")
+        nextButton.toolTip = imageMode ? "下一张（按 →）" : "下一篇（阅读模式按 →）"
+        nextButton.setAccessibilityLabel(imageMode ? "下一张" : "下一篇")
+
+        if imageMode {
+            closeDocumentFind(nil)
+            sidebarMode = .images
+        } else if sidebarMode == .images {
+            sidebarMode = .documents
+        }
+        sidebarModeControl.selectedSegment = sidebarMode.rawValue
+        isUpdatingSidebarSelection = true
+        sidebarTable.reloadData()
+        sidebarTable.deselectAll(nil)
+        DispatchQueue.main.async { [weak self] in self?.isUpdatingSidebarSelection = false }
+    }
+
+    private func replaceDocument(with url: URL) {
+        guard isSupportedContentURL(url) else {
+            NSSound.beep()
+            statusLabel.stringValue = "不支持这种文件"
             return
         }
         guard confirmLeavingCurrentDocument() else { return }
@@ -881,7 +1462,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     private func refreshSiblingDocuments() {
         guard let fileURL else {
-            siblingURLs = []
+            documentURLs = []
+            imageURLs = []
             updateNavigationControls()
             return
         }
@@ -891,24 +1473,33 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
         )) ?? []
-        siblingURLs = urls.filter { url in
-            let ext = url.pathExtension.lowercased()
-            guard ext == "md" || ext == "markdown" else { return false }
+        let regularFiles = urls.filter { url in
             return (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
         }.sorted {
             $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
         }
+        documentURLs = regularFiles.filter(isMarkdownURL)
+        imageURLs = regularFiles.filter(isImageURL)
         if !didChooseInitialSidebarVisibility {
-            sidebarVisible = siblingURLs.count > 1
+            sidebarVisible = documentURLs.count + imageURLs.count > 1
             didChooseInitialSidebarVisibility = true
             applySidebarVisibility()
         }
         updateNavigationControls()
     }
 
+    private var currentNavigationURLs: [URL] {
+        currentContentKind == .image ? imageURLs : documentURLs
+    }
+
     private var currentSiblingIndex: Int? {
         guard let current = fileURL?.standardizedFileURL else { return nil }
-        return siblingURLs.firstIndex { $0.standardizedFileURL == current }
+        return currentNavigationURLs.firstIndex { $0.standardizedFileURL == current }
+    }
+
+    private var sidebarMatchesCurrentContent: Bool {
+        (currentContentKind == .image && sidebarMode == .images)
+            || (currentContentKind == .markdown && sidebarMode == .documents)
     }
 
     private func updateNavigationControls() {
@@ -916,7 +1507,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             previousButton.isEnabled = false
             nextButton.isEnabled = false
             positionLabel.stringValue = ""
-            if sidebarMode == .documents {
+            if sidebarMatchesCurrentContent {
                 isUpdatingSidebarSelection = true
                 sidebarTable.reloadData()
                 sidebarTable.deselectAll(nil)
@@ -925,9 +1516,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             return
         }
         previousButton.isEnabled = index > 0
-        nextButton.isEnabled = index + 1 < siblingURLs.count
-        positionLabel.stringValue = "\(index + 1) / \(siblingURLs.count)"
-        if sidebarMode == .documents {
+        nextButton.isEnabled = index + 1 < currentNavigationURLs.count
+        positionLabel.stringValue = "\(index + 1) / \(currentNavigationURLs.count)"
+        if sidebarMatchesCurrentContent {
             isUpdatingSidebarSelection = true
             sidebarTable.reloadData()
             sidebarTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
@@ -943,14 +1534,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         refreshSiblingDocuments()
         guard let index = currentSiblingIndex else { NSSound.beep(); return }
         let destination = index + offset
-        guard siblingURLs.indices.contains(destination) else { NSSound.beep(); return }
+        guard currentNavigationURLs.indices.contains(destination) else { NSSound.beep(); return }
         navigateDocument(to: destination)
     }
 
     private func navigateDocument(to destination: Int) {
-        guard siblingURLs.indices.contains(destination) else { return }
+        let urls = currentNavigationURLs
+        guard urls.indices.contains(destination) else { return }
         guard confirmLeavingCurrentDocument() else { return }
-        fileURL = siblingURLs[destination]
+        fileURL = urls[destination]
         load(fileURL)
     }
 
@@ -1089,11 +1681,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     @objc private func sidebarModeChanged(_ sender: NSSegmentedControl) {
-        sidebarMode = SidebarMode(rawValue: sender.selectedSegment) ?? .documents
+        sidebarMode = SidebarMode(rawValue: sender.selectedSegment) ?? (currentContentKind == .image ? .images : .documents)
         isUpdatingSidebarSelection = true
         sidebarTable.reloadData()
         sidebarTable.deselectAll(nil)
-        if sidebarMode == .documents, let index = currentSiblingIndex {
+        if sidebarMatchesCurrentContent, let index = currentSiblingIndex {
             sidebarTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
             sidebarTable.scrollRowToVisible(index)
         }
@@ -1101,7 +1693,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        sidebarMode == .documents ? siblingURLs.count : documentHeadings.count
+        switch sidebarMode {
+        case .images: return imageURLs.count
+        case .documents: return documentURLs.count
+        case .outline: return documentHeadings.count
+        }
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -1125,8 +1721,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             ])
         }
         let name: String
-        if sidebarMode == .documents {
-            name = siblingURLs[row].lastPathComponent
+        if sidebarMode == .images {
+            name = imageURLs[row].lastPathComponent
+            cell.textField?.font = .systemFont(ofSize: 12.5)
+            cell.textField?.textColor = .labelColor
+        } else if sidebarMode == .documents {
+            name = documentURLs[row].lastPathComponent
             cell.textField?.font = .systemFont(ofSize: 12.5)
             cell.textField?.textColor = .labelColor
         } else {
@@ -1148,9 +1748,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             jumpToHeading(documentHeadings[row], index: row)
             return
         }
-        guard siblingURLs.indices.contains(row), row != currentSiblingIndex else { return }
+        let urls = sidebarMode == .images ? imageURLs : documentURLs
+        guard urls.indices.contains(row) else { return }
+        if urls[row].standardizedFileURL == fileURL?.standardizedFileURL { return }
         if confirmLeavingCurrentDocument() {
-            fileURL = siblingURLs[row]
+            fileURL = urls[row]
             load(fileURL)
         } else {
             updateNavigationControls()
@@ -1177,7 +1779,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     fileprivate func handleNavigationKey(_ event: NSEvent) -> Bool {
-        guard currentMode == .reading else { return false }
+        guard currentContentKind == .image || currentMode == .reading else { return false }
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
         guard modifiers.isEmpty else { return false }
         switch event.keyCode {
@@ -1236,6 +1838,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         window?.isDocumentEdited = hasUnsavedChanges
         statusLabel.stringValue = hasUnsavedChanges ? "有未保存修改" : "已保存"
         refreshDocumentOutline()
+        if !findBar.isHidden { refreshDocumentFind(restart: false) }
         renderWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.renderPreview() }
         renderWorkItem = item
@@ -1244,6 +1847,186 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     @objc private func useHighlightTool(_ sender: NSButton) { handleFormatTool(.highlight) }
     @objc private func useRedTextTool(_ sender: NSButton) { handleFormatTool(.redText) }
+    @objc private func insertIndentSyntax(_ sender: Any?) { _ = insertQuickSyntax("&emsp;&emsp;") }
+    @objc private func insertBlankBreakSyntax(_ sender: Any?) { _ = insertQuickSyntax("<br><br>") }
+
+    @discardableResult
+    private func insertQuickSyntax(_ text: String) -> Bool {
+        guard currentContentKind == .markdown, currentMode != .reading else { return false }
+        let selection = editor.selectedRange()
+        editor.insertText(text, replacementRange: selection)
+        editor.setSelectedRange(NSRange(location: selection.location + (text as NSString).length, length: 0))
+        formattingHint.stringValue = "已插入 \(text) · ⌘Z 可撤销"
+        window?.makeFirstResponder(editor)
+        return true
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === findField else { return false }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            closeDocumentFind(nil)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            let backwards = NSApp.currentEvent?.modifierFlags.contains(.shift) == true
+            stepDocumentFind(by: backwards ? -1 : 1)
+            return true
+        }
+        return false
+    }
+
+    @objc private func findChanged(_ sender: Any?) { refreshDocumentFind(restart: true) }
+
+    fileprivate func shouldRefreshDocumentFind(after event: NSEvent) -> Bool {
+        guard !findBar.isHidden, window?.firstResponder === findField.currentEditor() else { return false }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard !modifiers.contains(.command), !modifiers.contains(.control) else { return false }
+        return ![36, 48, 53, 76, 123, 124, 125, 126].contains(event.keyCode)
+    }
+
+    fileprivate func refreshDocumentFindAfterTyping() {
+        refreshDocumentFind(restart: true)
+    }
+
+    @objc private func findPrevious(_ sender: Any?) { stepDocumentFind(by: -1) }
+    @objc private func findNext(_ sender: Any?) { stepDocumentFind(by: 1) }
+
+    @objc func showDocumentFind(_ sender: Any?) {
+        guard currentContentKind == .markdown else {
+            NSSound.beep()
+            return
+        }
+        syntaxPopover?.close()
+        if findBar.isHidden {
+            findBar.isHidden = false
+            findBarHeightConstraint.constant = 42
+            window?.contentView?.layoutSubtreeIfNeeded()
+        }
+        refreshDocumentFind(restart: documentFindCount == 0)
+        window?.makeFirstResponder(findField)
+        findField.selectText(nil)
+    }
+
+    @objc private func closeDocumentFind(_ sender: Any?) {
+        guard !findBar.isHidden else { return }
+        findBarHeightConstraint.constant = 0
+        findBar.isHidden = true
+        clearEditorFindHighlights()
+        documentFindMatches.removeAll()
+        documentFindIndex = 0
+        documentFindCount = 0
+        updateDocumentFindControls()
+        clearPreviewFindHighlights()
+        if currentMode == .reading {
+            window?.makeFirstResponder(webView)
+        } else {
+            window?.makeFirstResponder(editor)
+        }
+    }
+
+    private func stepDocumentFind(by offset: Int) {
+        guard documentFindCount > 0 else { return }
+        documentFindIndex = (documentFindIndex + offset + documentFindCount) % documentFindCount
+        refreshDocumentFind(restart: false)
+    }
+
+    private func refreshDocumentFind(restart: Bool) {
+        let query = findField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if restart { documentFindIndex = 0 }
+        documentFindMatches = textMatches(in: editor.string, query: query)
+        clearEditorFindHighlights()
+
+        guard !query.isEmpty else {
+            documentFindCount = 0
+            documentFindIndex = 0
+            updateDocumentFindControls()
+            clearPreviewFindHighlights()
+            return
+        }
+
+        if currentMode != .reading {
+            applyEditorFindHighlights()
+        }
+
+        guard currentMode != .editing, webReady else {
+            documentFindCount = documentFindMatches.count
+            if documentFindCount > 0 { documentFindIndex %= documentFindCount }
+            updateDocumentFindControls()
+            return
+        }
+
+        documentFindGeneration += 1
+        let generation = documentFindGeneration
+        let script = "window.lightmarkFind(\(javaScriptString(query)), \(documentFindIndex));"
+        webView.evaluateJavaScript(script) { [weak self] value, _ in
+            guard let self, generation == self.documentFindGeneration else { return }
+            let result = value as? [String: Any]
+            let count = (result?["count"] as? NSNumber)?.intValue ?? 0
+            let index = (result?["index"] as? NSNumber)?.intValue ?? 0
+            self.documentFindCount = count
+            self.documentFindIndex = count > 0 ? index : 0
+            self.updateDocumentFindControls()
+        }
+    }
+
+    private func textMatches(in text: String, query: String) -> [NSRange] {
+        guard !query.isEmpty else { return [] }
+        let source = text as NSString
+        var matches: [NSRange] = []
+        var searchRange = NSRange(location: 0, length: source.length)
+        while searchRange.length > 0 {
+            let found = source.range(
+                of: query,
+                options: [.caseInsensitive, .diacriticInsensitive],
+                range: searchRange
+            )
+            guard found.location != NSNotFound else { break }
+            matches.append(found)
+            let nextLocation = found.location + max(found.length, 1)
+            guard nextLocation <= source.length else { break }
+            searchRange = NSRange(location: nextLocation, length: source.length - nextLocation)
+        }
+        return matches
+    }
+
+    private func clearEditorFindHighlights() {
+        let fullRange = NSRange(location: 0, length: (editor.string as NSString).length)
+        editor.layoutManager?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: fullRange)
+    }
+
+    private func applyEditorFindHighlights() {
+        guard let layoutManager = editor.layoutManager, !documentFindMatches.isEmpty else { return }
+        let activeIndex = documentFindIndex % documentFindMatches.count
+        for (index, range) in documentFindMatches.enumerated() {
+            let color = index == activeIndex
+                ? NSColor.systemOrange.withAlphaComponent(0.9)
+                : NSColor.systemYellow.withAlphaComponent(0.58)
+            layoutManager.addTemporaryAttribute(.backgroundColor, value: color, forCharacterRange: range)
+        }
+        editor.scrollRangeToVisible(documentFindMatches[activeIndex])
+    }
+
+    private func clearPreviewFindHighlights() {
+        guard webReady else { return }
+        documentFindGeneration += 1
+        webView.evaluateJavaScript("window.lightmarkFind('', 0);")
+    }
+
+    private func updateDocumentFindControls() {
+        findCountLabel.stringValue = documentFindCount > 0
+            ? "\(documentFindIndex + 1) / \(documentFindCount)"
+            : "0 / 0"
+        findPreviousButton.isEnabled = documentFindCount > 0
+        findNextButton.isEnabled = documentFindCount > 0
+    }
+
+    private func javaScriptString(_ string: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [string]),
+              var json = String(data: data, encoding: .utf8) else { return "\"\"" }
+        json.removeFirst()
+        json.removeLast()
+        return json
+    }
 
     private func handleFormatTool(_ tool: InlineFormatTool) {
         if let activeFormatTool {
@@ -1334,7 +2117,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         let followEditor = currentMode == .split
             ? "requestAnimationFrame(() => { const e = document.scrollingElement; const max = Math.max(0, e.scrollHeight - innerHeight); window.scrollTo(0, max * \(editorViewportRatio())); });"
             : ""
-        webView.evaluateJavaScript("window.lightmarkRender(\(json)); window.lightmarkSetScale(\(fontScale)); \(followEditor)")
+        webView.evaluateJavaScript("window.lightmarkRender(\(json)); window.lightmarkSetScale(\(fontScale)); \(followEditor)") { [weak self] _, _ in
+            guard let self, !self.findBar.isHidden, self.currentMode != .editing else { return }
+            self.refreshDocumentFind(restart: false)
+        }
     }
 
     private func editorViewportRatio() -> CGFloat {
@@ -1357,6 +2143,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     private func applyMode(_ mode: ViewMode) {
+        guard currentContentKind == .markdown else { return }
         currentMode = mode
         modeControl.selectedSegment = mode.rawValue
         editorContainer.isHidden = mode == .reading
@@ -1371,6 +2158,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         }
         if mode != .editing { renderPreview() }
         if mode == .editing { window?.makeFirstResponder(editor) }
+        if !findBar.isHidden { refreshDocumentFind(restart: false) }
     }
 
     @objc func showReading(_ sender: Any?) { applyMode(.reading) }
@@ -1418,115 +2206,28 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     @objc func showSyntaxGuide(_ sender: Any?) {
+        guard currentContentKind == .markdown else { return }
+        if !findBar.isHidden { closeDocumentFind(nil) }
         if syntaxPopover?.isShown == true {
-            syntaxGuideController?.focusSearch()
+            syntaxGuideController?.focusFirstAction()
             return
         }
 
         let popover = NSPopover()
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 450, height: 570)
+        popover.contentSize = NSSize(width: 680, height: 650)
 
-        let guideText = """
-        标题
-        # 一级标题
-        ## 二级标题
-        ### 三级标题
-        #### 四级标题
-
-        文字
-        **粗体**
-        *斜体*
-        ~~删除线~~
-        `行内代码`
-
-        黄色高光
-        <mark>需要高光的文字</mark>
-
-        红色文字
-        <span class="text-red">红色文字</span>
-
-        段落、换行与中文段首
-        第一段文字
-
-        第二段文字（中间空一整行就是新段落）
-        行尾加两个半角空格再回车，只换行、不分段
-        　　中文段首可输入两个全角空格
-        注意：行首 4 个半角空格会变成代码块，不是首行缩进
-
-        列表
-        - 无序列表
-        1. 有序列表
-        - [ ] 未完成任务
-        - [x] 已完成任务
-
-        引用与分隔线
-        > 引用内容
-        ---
-
-        链接和图片
-        [显示文字](https://example.com)
-        ![图片说明](images/photo.png)
-
-        代码块
-        ```swift
-        let message = "Hello"
-        ```
-
-        表格
-        | 名称 | 数值 |
-        | --- | --- |
-        | 示例 | 100 |
-
-        Obsidian Callout
-        > [!note] 提示标题
-        > 这里填写提示内容
-
-        > [!warning] 注意
-        > 这里填写警告内容
-
-        完整 Callout 类型与别名
-        note
-        abstract / summary / tldr
-        info
-        todo
-        tip / hint / important
-        success / check / done
-        question / help / faq
-        warning / caution / attention
-        failure / fail / missing
-        danger / error
-        bug
-        example
-        quote / cite
-
-        可折叠 Callout
-        > [!faq]- 默认收起
-        > 点击标题后显示内容
-
-        > [!tip]+ 默认展开
-        > 点击标题后收起内容
-
-        嵌套 Callout
-        > [!question] 外层 Callout
-        > > [!todo] 内层 Callout
-        > > 这里填写嵌套内容
-
-        Obsidian Wiki Link
-        [[文档名称]]
-        [[文档名称|显示文字]]
-        """
-
-        let controller = SyntaxGuideViewController(guideText: guideText)
+        let controller = SyntaxGuideViewController()
         popover.contentViewController = controller
         let anchor = (sender as? NSView) ?? syntaxButton
         popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
         syntaxPopover = popover
         syntaxGuideController = controller
-        DispatchQueue.main.async { controller.focusSearch() }
+        DispatchQueue.main.async { controller.focusFirstAction() }
     }
 
     @objc func copyMarkdownSource(_ sender: Any?) {
+        guard currentContentKind == .markdown else { return }
         let previousStatus = statusLabel.stringValue
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -1557,14 +2258,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     @objc func save(_ sender: Any?) {
+        guard currentContentKind == .markdown else { return }
         guard let url = fileURL else { saveAs(sender); return }
         write(to: url)
     }
 
     @objc func saveAs(_ sender: Any?) {
+        guard currentContentKind == .markdown else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.init(filenameExtension: "md")!]
         panel.nameFieldStringValue = fileURL?.lastPathComponent ?? "未命名.md"
+        panel.directoryURL = fileURL?.deletingLastPathComponent()
         guard panel.runModal() == .OK, let url = panel.url else { return }
         fileURL = url
         write(to: url)
@@ -1585,9 +2289,110 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         }
     }
 
-    @objc func zoomIn(_ sender: Any?) { fontScale = min(1.5, fontScale + 0.1); renderPreview() }
-    @objc func zoomOut(_ sender: Any?) { fontScale = max(0.75, fontScale - 0.1); renderPreview() }
-    @objc func zoomReset(_ sender: Any?) { fontScale = 1.0; renderPreview() }
+    private func rememberImageZoomPreference() {
+        UserDefaults.standard.set(imageZoomMode.rawValue, forKey: "LightMarkImageZoomMode")
+        UserDefaults.standard.set(Double(imageScale), forKey: "LightMarkImageZoomScale")
+    }
+
+    private func updateImageControls() {
+        let percent = Int((imageScale * 100).rounded())
+        imageZoomLabel.stringValue = imageZoomMode == .fit ? "适合 \(percent)%" : "\(percent)%"
+        imageZoomOutButton.isEnabled = imageScale > 0.0501
+        imageZoomInButton.isEnabled = imageScale < 7.999
+        imageFitButton.state = imageZoomMode == .fit ? .on : .off
+        imageActualButton.state = imageZoomMode == .actual ? .on : .off
+    }
+
+    private func setImageScale(_ scale: CGFloat, mode: ImageZoomMode, preserveCenter: Bool = false, alignTop: Bool = false) {
+        guard imageCanvas.naturalSize.width > 0, imageCanvas.naturalSize.height > 0 else { return }
+        let clipView = imageScroll.contentView
+        let oldSize = imageCanvas.frame.size
+        let centerRatioX = oldSize.width > 0 ? clipView.bounds.midX / oldSize.width : 0.5
+        let centerRatioY = oldSize.height > 0 ? clipView.bounds.midY / oldSize.height : 0.5
+
+        imageScale = min(8, max(0.05, scale))
+        imageZoomMode = mode
+        rememberImageZoomPreference()
+        imageCanvas.updateScale(imageScale, viewportSize: clipView.bounds.size)
+        imageScroll.layoutSubtreeIfNeeded()
+        updateImageControls()
+
+        let newSize = imageCanvas.frame.size
+        let viewport = clipView.bounds.size
+        let origin: NSPoint
+        if preserveCenter {
+            origin = NSPoint(
+                x: centerRatioX * newSize.width - viewport.width / 2,
+                y: centerRatioY * newSize.height - viewport.height / 2
+            )
+        } else {
+            origin = NSPoint(
+                x: max(0, (newSize.width - viewport.width) / 2),
+                y: alignTop ? 0 : max(0, (newSize.height - viewport.height) / 2)
+            )
+        }
+        let constrained = clipView.constrainBoundsRect(NSRect(origin: origin, size: viewport))
+        clipView.scroll(to: constrained.origin)
+        imageScroll.reflectScrolledClipView(clipView)
+    }
+
+    private func fitImage(alignTop: Bool = false) {
+        let availableWidth = max(1, imageScroll.contentView.bounds.width - 48)
+        let availableHeight = max(1, imageScroll.contentView.bounds.height - 48)
+        let scale = min(
+            1,
+            availableWidth / max(1, imageCanvas.naturalSize.width),
+            availableHeight / max(1, imageCanvas.naturalSize.height)
+        )
+        setImageScale(scale, mode: .fit, alignTop: alignTop)
+    }
+
+    private func applyImageZoomPreference(alignTop: Bool) {
+        switch imageZoomMode {
+        case .fit: fitImage(alignTop: alignTop)
+        case .actual: setImageScale(1, mode: .actual, alignTop: alignTop)
+        case .custom: setImageScale(imageScale, mode: .custom, alignTop: alignTop)
+        }
+    }
+
+    private func zoomImage(by factor: CGFloat) {
+        setImageScale(imageScale * factor, mode: .custom, preserveCenter: true)
+    }
+
+    @objc private func zoomImageOut(_ sender: Any?) { zoomImage(by: 1 / 1.2) }
+    @objc private func zoomImageIn(_ sender: Any?) { zoomImage(by: 1.2) }
+    @objc private func fitImageToWindow(_ sender: Any?) { fitImage() }
+    @objc private func showImageAtActualSize(_ sender: Any?) { setImageScale(1, mode: .actual) }
+
+    @objc func zoomIn(_ sender: Any?) {
+        if currentContentKind == .image { zoomImage(by: 1.2); return }
+        fontScale = min(1.5, fontScale + 0.1)
+        renderPreview()
+    }
+
+    @objc func zoomOut(_ sender: Any?) {
+        if currentContentKind == .image { zoomImage(by: 1 / 1.2); return }
+        fontScale = max(0.75, fontScale - 0.1)
+        renderPreview()
+    }
+
+    @objc func zoomReset(_ sender: Any?) {
+        if currentContentKind == .image { showImageAtActualSize(sender); return }
+        fontScale = 1.0
+        renderPreview()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard currentContentKind == .image else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.imageZoomMode == .fit {
+                self.fitImage()
+            } else {
+                self.setImageScale(self.imageScale, mode: self.imageZoomMode, preserveCenter: true)
+            }
+        }
+    }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard hasUnsavedChanges else { return true }
@@ -1633,7 +2438,7 @@ final class DropView: NSView {
 
     private func acceptableURL(from sender: NSDraggingInfo) -> URL? {
         guard let value = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self])?.first as? URL,
-              ["md", "markdown", "txt"].contains(value.pathExtension.lowercased()) else { return nil }
+              isSupportedContentURL(value) else { return nil }
         return value
     }
 }
