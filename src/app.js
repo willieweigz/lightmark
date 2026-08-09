@@ -7,6 +7,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { accountLabel, answerModeDetails, chooseAiContext, contextPreview, normalizeAnswerMode } from "./ai.js";
 import {
   applyTextCompletion,
+  buildHeadingSections,
   directoryFromPath,
   extractHeadings,
   findHtmlCompletionContext,
@@ -76,6 +77,7 @@ const elements = {
   redTextTool: document.querySelector("#red-text-tool"),
   formattingHint: document.querySelector("#formatting-hint"),
   indentInsert: document.querySelector("#indent-insert"),
+  lineBreakInsert: document.querySelector("#line-break-insert"),
   blankBreakInsert: document.querySelector("#blank-break-insert"),
   editorOverlay: document.querySelector("#editor-overlay"),
   editor: document.querySelector("#editor"),
@@ -126,6 +128,7 @@ const state = {
   documents: [],
   images: [],
   headings: [],
+  collapsedHeadingKeys: new Set(),
   contentKind: "markdown",
   currentPath: null,
   currentDirectory: null,
@@ -267,6 +270,9 @@ elements.preview.addEventListener("load", () => {
 });
 
 function bindPreviewLinks() {
+  elements.preview.contentDocument?.addEventListener("lightmark-heading-fold", (event) => {
+    toggleHeadingFold(Number(event.detail?.index), Boolean(event.detail?.collapsed));
+  });
   elements.preview.contentDocument?.addEventListener("click", async (event) => {
     const link = event.target.closest?.("a");
     if (!link) return;
@@ -298,7 +304,7 @@ async function renderPreview() {
   if (!state.rendererReady) return;
   const generation = ++state.renderGeneration;
   const previewWindow = elements.preview.contentWindow;
-  previewWindow.lightmarkRender(elements.editor.value);
+  previewWindow.lightmarkRender(elements.editor.value, collapsedHeadingIndices());
   rebuildScrollAnchors();
   syncPreviewToEditor();
 
@@ -414,23 +420,70 @@ function setSidebarView(view) {
 }
 
 function renderOutline() {
-  state.headings = extractHeadings(elements.editor.value);
+  state.headings = buildHeadingSections(extractHeadings(elements.editor.value));
+  const currentKeys = new Set(state.headings.map((heading) => heading.foldKey));
+  state.collapsedHeadingKeys.forEach((key) => {
+    if (!currentKeys.has(key)) state.collapsedHeadingKeys.delete(key);
+  });
   elements.outlineList.replaceChildren();
+  const collapsedAncestors = [];
   state.headings.forEach((heading, index) => {
+    while (collapsedAncestors.length && collapsedAncestors.at(-1).level >= heading.level) collapsedAncestors.pop();
+    const hiddenByAncestor = collapsedAncestors.length > 0;
+    const collapsed = state.collapsedHeadingKeys.has(heading.foldKey);
+    const row = document.createElement("div");
+    row.className = "outline-row";
+    row.dataset.level = String(heading.level);
+    row.dataset.headingIndex = String(index);
+    row.style.setProperty("--outline-indent", `${5 + (heading.level - 1) * 14}px`);
+    row.hidden = hiddenByAncestor;
+
+    const fold = document.createElement("button");
+    fold.type = "button";
+    fold.className = "outline-fold-toggle";
+    fold.setAttribute("aria-expanded", String(!collapsed));
+    fold.setAttribute("aria-label", `${collapsed ? "展开" : "收起"}${heading.title}`);
+    fold.title = collapsed ? "展开这个标题" : "收起这个标题";
+    fold.addEventListener("click", () => toggleHeadingFold(index));
+
     const button = document.createElement("button");
+    button.type = "button";
     button.className = "outline-item";
     button.dataset.level = String(heading.level);
-    button.style.setProperty("--outline-indent", `${9 + (heading.level - 1) * 14}px`);
     button.textContent = heading.title;
     button.title = heading.title;
     button.addEventListener("click", () => jumpToHeading(heading, index));
-    elements.outlineList.append(button);
+    row.append(fold, button);
+    elements.outlineList.append(row);
+    if (collapsed) collapsedAncestors.push({ level: heading.level });
   });
   updateSidebarView();
 }
 
+function collapsedHeadingIndices() {
+  return state.headings.reduce((indices, heading, index) => {
+    if (state.collapsedHeadingKeys.has(heading.foldKey)) indices.push(index);
+    return indices;
+  }, []);
+}
+
+function applyPreviewHeadingFolds() {
+  elements.preview.contentWindow?.lightmarkSetHeadingFolds?.(collapsedHeadingIndices());
+  requestAnimationFrame(() => rebuildScrollAnchors());
+}
+
+function toggleHeadingFold(index, nextCollapsed = null) {
+  const heading = state.headings[index];
+  if (!heading) return;
+  const collapsed = nextCollapsed ?? !state.collapsedHeadingKeys.has(heading.foldKey);
+  if (collapsed) state.collapsedHeadingKeys.add(heading.foldKey);
+  else state.collapsedHeadingKeys.delete(heading.foldKey);
+  renderOutline();
+  applyPreviewHeadingFolds();
+}
+
 function scrollPreviewToHeading(index) {
-  const heading = elements.preview.contentDocument?.querySelectorAll("h1, h2, h3, h4, h5, h6")[index];
+  const heading = elements.preview.contentDocument?.querySelector(`[data-lightmark-heading-index="${index}"]`);
   const previewWindow = elements.preview.contentWindow;
   if (!heading || !previewWindow) return;
   setPreviewScroll(heading.getBoundingClientRect().top + previewWindow.scrollY);
@@ -578,6 +631,7 @@ async function loadImage(path, { refreshSiblings = false } = {}) {
   state.imageNaturalHeight = 0;
   elements.editor.value = "";
   state.headings = [];
+  state.collapsedHeadingKeys.clear();
   elements.outlineList.replaceChildren();
   elements.title.textContent = payload.name;
   elements.path.textContent = payload.path;
@@ -634,6 +688,7 @@ async function loadDocument(path, { refreshSiblings = false } = {}) {
   state.previewProgrammaticTarget = null;
   state.lastSavedText = payload.contents;
   elements.editor.value = payload.contents;
+  state.collapsedHeadingKeys.clear();
   renderEditorOverlay();
   renderOutline();
   setFormatTool(null);
@@ -969,9 +1024,15 @@ function rebuildScrollAnchors() {
   const previewDocument = elements.preview.contentDocument;
   const scroller = previewDocument?.scrollingElement;
   if (!previewWindow || !scroller) return;
-  const renderedHeadings = [...previewDocument.querySelectorAll("h1, h2, h3, h4, h5, h6")];
-  const count = Math.min(state.headings.length, renderedHeadings.length);
-  const editorPositions = measureEditorHeadingPositions(state.headings.slice(0, count).map((heading) => heading.offset));
+  const renderedHeadings = [...previewDocument.querySelectorAll("[data-lightmark-heading-index]")]
+    .filter((heading) => !heading.classList.contains("heading-fold-hidden"));
+  const headingIndexes = renderedHeadings
+    .map((heading) => Number(heading.dataset.lightmarkHeadingIndex))
+    .filter((index) => Number.isInteger(index) && state.headings[index]);
+  const count = Math.min(headingIndexes.length, renderedHeadings.length);
+  const editorPositions = measureEditorHeadingPositions(
+    headingIndexes.slice(0, count).map((index) => state.headings[index].offset),
+  );
   const anchors = [{ editor: 0, preview: 0 }];
   for (let index = 0; index < count; index += 1) {
     const editor = editorPositions[index];
@@ -1233,6 +1294,7 @@ const formatToolDetails = {
 
 const quickInsertDetails = {
   indent: { button: elements.indentInsert, text: "&emsp;&emsp;", shortcut: "Alt+1" },
+  lineBreak: { button: elements.lineBreakInsert, text: "<br>", shortcut: "Alt+3" },
   blankBreak: { button: elements.blankBreakInsert, text: "<br><br>", shortcut: "Alt+2" },
 };
 
@@ -2039,7 +2101,13 @@ document.addEventListener("keydown", (event) => {
   }
   const control = event.ctrlKey || event.metaKey;
   const quickInsert = event.altKey && !control && !event.shiftKey && document.activeElement === elements.editor
-    ? (event.code === "Digit1" ? quickInsertDetails.indent : event.code === "Digit2" ? quickInsertDetails.blankBreak : null)
+    ? (event.code === "Digit1"
+      ? quickInsertDetails.indent
+      : event.code === "Digit2"
+        ? quickInsertDetails.blankBreak
+        : event.code === "Digit3"
+          ? quickInsertDetails.lineBreak
+          : null)
     : null;
   if (quickInsert) {
     event.preventDefault();

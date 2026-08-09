@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   applyTextCompletion,
+  buildHeadingSections,
   directoryFromPath,
   extractHeadings,
   findHtmlCompletionContext,
@@ -122,6 +123,30 @@ describe("Markdown document helpers", () => {
     assert.deepEqual(extractHeadings("---\ntitle: 不应成为标题\ntags: [测试]\n---\n# 正文标题\n"), [
       { level: 1, title: "正文标题", offset: 33, line: 4 },
     ]);
+  });
+
+  it("builds stable fold sections for every heading level", () => {
+    const headings = extractHeadings([
+      "# 一级",
+      "## 二级",
+      "#### 四级",
+      "##### 五级",
+      "###### 六级",
+      "#### 四级",
+      "## 二级",
+    ].join("\n"));
+    const sections = buildHeadingSections(headings);
+    assert.deepEqual(sections.map(({ level, endIndex }) => [level, endIndex]), [
+      [1, 7],
+      [2, 6],
+      [4, 5],
+      [5, 5],
+      [6, 5],
+      [4, 6],
+      [2, 7],
+    ]);
+    assert.notEqual(sections[1].foldKey, sections[6].foldKey);
+    assert.notEqual(sections[2].foldKey, sections[5].foldKey);
   });
 
   it("adds and removes yellow highlight markup around selected text", () => {

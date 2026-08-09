@@ -182,6 +182,27 @@ export function extractHeadings(source) {
   return headings;
 }
 
+export function buildHeadingSections(headings) {
+  const occurrences = new Map();
+  return headings.map((heading, index) => {
+    const signature = `${heading.level}\u0000${heading.title}`;
+    const occurrence = (occurrences.get(signature) || 0) + 1;
+    occurrences.set(signature, occurrence);
+    let endIndex = headings.length;
+    for (let nextIndex = index + 1; nextIndex < headings.length; nextIndex += 1) {
+      if (headings[nextIndex].level <= heading.level) {
+        endIndex = nextIndex;
+        break;
+      }
+    }
+    return {
+      ...heading,
+      foldKey: `${signature}\u0000${occurrence}`,
+      endIndex,
+    };
+  });
+}
+
 const inlineFormats = Object.freeze({
   highlight: { opening: "<mark>", closing: "</mark>" },
   redText: { opening: '<span class="text-red">', closing: "</span>" },

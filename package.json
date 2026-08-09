@@ -9,6 +9,7 @@
     "build": "vite build",
     "test": "node --test src/*.test.js",
     "test:windows": "node scripts/windows-e2e.mjs",
+    "test:windows:heading": "node scripts/windows-heading-fold-e2e.mjs",
     "test:windows:image": "node scripts/windows-image-e2e.mjs",
     "tauri": "tauri"
   },
