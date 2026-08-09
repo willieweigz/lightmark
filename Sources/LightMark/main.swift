@@ -260,6 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func zoomOut(_ sender: Any?) { currentDocument?.zoomOut(sender) }
     @objc private func zoomReset(_ sender: Any?) { currentDocument?.zoomReset(sender) }
     @objc private func toggleSidebar(_ sender: Any?) { currentDocument?.toggleSidebar(sender) }
+    @objc private func showDocumentFind(_ sender: Any?) { currentDocument?.showDocumentFind(sender) }
     @objc private func showMarkdownSyntax(_ sender: Any?) { currentDocument?.showSyntaxGuide(sender) }
     @objc private func copyMarkdownDocument(_ sender: Any?) { currentDocument?.copyMarkdownSource(sender) }
 
@@ -321,6 +322,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         copyMarkdown.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(.separator())
+        let findDocument = editMenu.addItem(withTitle: "查找正文…", action: #selector(showDocumentFind(_:)), keyEquivalent: "f")
+        findDocument.target = self
         editItem.submenu = editMenu
 
         let viewItem = NSMenuItem()
@@ -359,7 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let helpItem = NSMenuItem()
         main.addItem(helpItem)
         let helpMenu = NSMenu(title: "帮助")
-        let syntax = helpMenu.addItem(withTitle: "Markdown 语法速查（⌘F / ⌘/）", action: #selector(showMarkdownSyntax(_:)), keyEquivalent: "/")
+        let syntax = helpMenu.addItem(withTitle: "Markdown 语法速查（⌘/）", action: #selector(showMarkdownSyntax(_:)), keyEquivalent: "/")
         syntax.target = self
         syntax.keyEquivalentModifierMask = [.command]
         helpItem.submenu = helpMenu
@@ -372,10 +376,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 private final class DocumentWindow: NSWindow {
     weak var documentController: DocumentWindowController?
 
+    override func sendEvent(_ event: NSEvent) {
+        let refreshFind = event.type == .keyDown
+            && documentController?.shouldRefreshDocumentFind(after: event) == true
+        super.sendEvent(event)
+        if refreshFind {
+            DispatchQueue.main.async { [weak self] in
+                self?.documentController?.refreshDocumentFindAfterTyping()
+            }
+        }
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let key = event.charactersIgnoringModifiers?.lowercased()
-        if modifiers == [.command], key == "f" || key == "/" {
+        if modifiers == [.command], key == "f" {
+            documentController?.showDocumentFind(nil)
+            return true
+        }
+        if modifiers == [.command], key == "/" {
             documentController?.showSyntaxGuide(nil)
             return true
         }
@@ -399,6 +418,7 @@ private final class DocumentWindow: NSWindow {
 private final class FormattingTextView: NSTextView {
     var onMouseSelectionFinished: (() -> Void)?
     var onCancelFormatTool: (() -> Bool)?
+    var onQuickInsert: ((Int) -> Bool)?
 
     override func mouseUp(with event: NSEvent) {
         super.mouseUp(with: event)
@@ -407,60 +427,122 @@ private final class FormattingTextView: NSTextView {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53, onCancelFormatTool?() == true { return }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == [.option], event.keyCode == 18 || event.keyCode == 19,
+           onQuickInsert?(event.keyCode == 18 ? 1 : 2) == true { return }
         super.keyDown(with: event)
     }
 }
 
-private final class SyntaxGuideViewController: NSViewController, NSSearchFieldDelegate {
-    private let guideText: String
-    private let searchField = NSSearchField()
-    private let resultLabel = NSTextField(labelWithString: "")
-    private let guideView = NSTextView(frame: NSRect(x: 0, y: 0, width: 410, height: 2200))
-    private var matches: [NSRange] = []
-    private var currentMatch = 0
+private struct SyntaxTemplate {
+    let label: String
+    let text: String
+}
 
-    init(guideText: String) {
-        self.guideText = guideText
-        super.init(nibName: nil, bundle: nil)
+private struct SyntaxSection {
+    let title: String
+    let example: String
+    let details: String?
+    let templates: [SyntaxTemplate]
+    let wide: Bool
+}
+
+private final class SyntaxCopyButton: NSButton {
+    let templateText: String
+    let defaultTitle: String
+
+    init(template: SyntaxTemplate, target: AnyObject?, action: Selector?) {
+        templateText = template.text
+        defaultTitle = "复制\(template.label)"
+        super.init(frame: .zero)
+        title = defaultTitle
+        self.target = target
+        self.action = action
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+private final class SyntaxGuideViewController: NSViewController {
+    private let feedbackLabel = NSTextField(labelWithString: "点击按钮复制模板，回到正文按 ⌘V 粘贴")
+    private var firstCopyButton: NSButton?
+
+    private let sections: [SyntaxSection] = [
+        .init(title: "标题", example: "# 一级标题\n## 二级标题\n### 三级标题", details: nil, templates: [
+            .init(label: "一级标题", text: "# 标题"),
+            .init(label: "二级标题", text: "## 标题")
+        ], wide: false),
+        .init(title: "文字", example: "**粗体**\n*斜体*\n~~删除线~~\n`行内代码`", details: nil, templates: [
+            .init(label: "粗体", text: "**粗体文字**"),
+            .init(label: "斜体", text: "*斜体文字*"),
+            .init(label: "删除线", text: "~~删除线文字~~"),
+            .init(label: "行内代码", text: "`代码`")
+        ], wide: false),
+        .init(title: "黄色高光与红色文字", example: "<mark>需要高光的文字</mark>\n<span class=\"text-red\">红色文字</span>", details: "这是 LightMark 支持的安全内嵌 HTML 格式。", templates: [
+            .init(label: "黄色高光", text: "<mark>需要高光的文字</mark>"),
+            .init(label: "红色文字", text: "<span class=\"text-red\">红色文字</span>")
+        ], wide: false),
+        .init(title: "段落、换行与段首", example: "&emsp;&emsp;中文段首\n<br>\n<br><br>", details: "正文编辑栏也提供 &emsp;&emsp; 与 <br><br> 两个常用按钮。", templates: [
+            .init(label: "段首缩进", text: "&emsp;&emsp;"),
+            .init(label: "换行", text: "<br>"),
+            .init(label: "空一行", text: "<br><br>"),
+            .init(label: "全角空格", text: "　　")
+        ], wide: false),
+        .init(title: "列表与任务", example: "- 无序列表\n1. 有序列表\n- [ ] 待完成\n- [x] 已完成", details: nil, templates: [
+            .init(label: "无序列表", text: "- 第一项\n- 第二项"),
+            .init(label: "有序列表", text: "1. 第一项\n2. 第二项"),
+            .init(label: "任务列表", text: "- [ ] 待完成\n- [x] 已完成")
+        ], wide: false),
+        .init(title: "引用与分隔线", example: "> 引用内容\n\n---", details: nil, templates: [
+            .init(label: "引用", text: "> 引用内容"),
+            .init(label: "分隔线", text: "---")
+        ], wide: false),
+        .init(title: "链接与图片", example: "[显示文字](https://example.com)\n![图片说明](images/photo.png)", details: nil, templates: [
+            .init(label: "链接", text: "[显示文字](https://example.com)"),
+            .init(label: "图片", text: "![图片说明](images/photo.png)")
+        ], wide: false),
+        .init(title: "Obsidian 图片与 Wiki Link", example: "![[asset/图片.png|480]]\n[[文档名称|显示文字]]", details: "竖线后的数字是图片显示宽度。", templates: [
+            .init(label: "Obsidian 图片", text: "![[asset/图片.png]]"),
+            .init(label: "指定宽度图片", text: "![[asset/图片.png|480]]"),
+            .init(label: "Wiki Link", text: "[[文档名称]]"),
+            .init(label: "带别名链接", text: "[[文档名称|显示文字]]")
+        ], wide: false),
+        .init(title: "代码块", example: "```swift\nlet message = \"Hello\"\n```", details: nil, templates: [
+            .init(label: "代码块", text: "```swift\nlet message = \"Hello\"\n```")
+        ], wide: false),
+        .init(title: "表格", example: "| 名称 | 数值 |\n| --- | ---: |\n| 示例 | 100 |", details: nil, templates: [
+            .init(label: "表格", text: "| 名称 | 数值 |\n| --- | ---: |\n| 示例 | 100 |")
+        ], wide: false),
+        .init(title: "Obsidian Callout", example: "> [!note] 自定义标题\n> 这里是内容\n\n> [!faq]- 默认收起\n> 收起的内容\n\n> [!tip]+ 默认展开\n> 展开的内容", details: "支持 note、abstract/summary/tldr、info、todo、tip/hint/important、success/check/done、question/help/faq、warning/caution/attention、failure/fail/missing、danger/error、bug、example、quote/cite，以及多层嵌套。", templates: [
+            .init(label: "基础 Callout", text: "> [!note] 自定义标题\n> 这里是内容"),
+            .init(label: "默认收起", text: "> [!faq]- 默认收起\n> 收起的内容"),
+            .init(label: "默认展开", text: "> [!tip]+ 默认展开\n> 展开的内容"),
+            .init(label: "多层嵌套", text: "> [!question] 可以嵌套吗？\n> > [!todo] 可以\n> > > [!example] 支持多层")
+        ], wide: true),
+        .init(title: "Frontmatter", example: "---\ntitle: 文档标题\ntags: [示例]\n---", details: nil, templates: [
+            .init(label: "Frontmatter", text: "---\ntitle: 文档标题\ntags: [示例]\n---")
+        ], wide: true)
+    ]
+
+    init() {
+        super.init(nibName: nil, bundle: nil)
+    }
 
     override func loadView() {
-        let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 450, height: 570))
+        let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 680, height: 650))
         root.material = .popover
         root.state = .active
 
         let heading = NSTextField(labelWithString: "Markdown 语法速查")
-        heading.font = .systemFont(ofSize: 16, weight: .semibold)
+        heading.font = .systemFont(ofSize: 17, weight: .semibold)
         heading.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(heading)
 
-        searchField.placeholderString = "搜索语法，例如 Callout、折叠、图片"
-        searchField.sendsSearchStringImmediately = true
-        searchField.delegate = self
-        searchField.target = self
-        searchField.action = #selector(searchSubmitted(_:))
-        searchField.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(searchField)
-
-        resultLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        resultLabel.textColor = .secondaryLabelColor
-        resultLabel.alignment = .right
-        resultLabel.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(resultLabel)
-
-        let previous = NSButton(title: "‹", target: self, action: #selector(previousResult(_:)))
-        previous.bezelStyle = .inline
-        previous.toolTip = "上一个结果（Shift+Enter）"
-        previous.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(previous)
-
-        let next = NSButton(title: "›", target: self, action: #selector(nextResult(_:)))
-        next.bezelStyle = .inline
-        next.toolTip = "下一个结果（Enter）"
-        next.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(next)
+        feedbackLabel.font = .systemFont(ofSize: 11.5)
+        feedbackLabel.textColor = .secondaryLabelColor
+        feedbackLabel.lineBreakMode = .byTruncatingTail
+        feedbackLabel.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(feedbackLabel)
 
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
@@ -469,127 +551,175 @@ private final class SyntaxGuideViewController: NSViewController, NSSearchFieldDe
         scroll.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(scroll)
 
-        guideView.isEditable = false
-        guideView.isSelectable = true
-        guideView.drawsBackground = false
-        guideView.font = .monospacedSystemFont(ofSize: 12.5, weight: .regular)
-        guideView.textColor = .labelColor
-        guideView.textContainerInset = NSSize(width: 8, height: 8)
-        guideView.autoresizingMask = [.width]
-        guideView.minSize = NSSize(width: 0, height: 0)
-        guideView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        guideView.isVerticallyResizable = true
-        guideView.isHorizontallyResizable = false
-        guideView.textContainer?.widthTracksTextView = true
-        guideView.textContainer?.containerSize = NSSize(width: 414, height: CGFloat.greatestFiniteMagnitude)
-        guideView.string = guideText
-        scroll.documentView = guideView
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = content
+
+        let rows = NSStackView()
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.distribution = .fill
+        rows.spacing = 11
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(rows)
+
+        func appendRow(_ cards: [NSView]) {
+            let row = makeRow(cards)
+            rows.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+        }
+
+        var pendingCard: NSView?
+        for section in sections {
+            let card = makeCard(section)
+            if section.wide {
+                if let queuedCard = pendingCard {
+                    appendRow([queuedCard])
+                }
+                pendingCard = nil
+                appendRow([card])
+            } else if let queuedCard = pendingCard {
+                appendRow([queuedCard, card])
+                pendingCard = nil
+            } else {
+                pendingCard = card
+            }
+        }
+        if let queuedCard = pendingCard { appendRow([queuedCard]) }
 
         NSLayoutConstraint.activate([
             heading.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
-            heading.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
             heading.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
-            searchField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
-            searchField.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 12),
-            searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 250),
-            resultLabel.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: 8),
-            resultLabel.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            resultLabel.widthAnchor.constraint(equalToConstant: 45),
-            previous.leadingAnchor.constraint(equalTo: resultLabel.trailingAnchor, constant: 3),
-            previous.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            previous.widthAnchor.constraint(equalToConstant: 25),
-            next.leadingAnchor.constraint(equalTo: previous.trailingAnchor, constant: 1),
-            next.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            next.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            next.widthAnchor.constraint(equalToConstant: 25),
+            feedbackLabel.leadingAnchor.constraint(equalTo: heading.trailingAnchor, constant: 12),
+            feedbackLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            feedbackLabel.centerYAnchor.constraint(equalTo: heading.centerYAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
-            scroll.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 10),
-            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10)
+            scroll.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 12),
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
+            content.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            content.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            content.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            rows.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
+            rows.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
+            rows.topAnchor.constraint(equalTo: content.topAnchor, constant: 4),
+            rows.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8)
         ])
 
         view = root
     }
 
-    func focusSearch() {
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func focusFirstAction() {
         _ = view
-        view.window?.makeFirstResponder(searchField)
+        view.window?.makeFirstResponder(firstCopyButton)
     }
 
-    func controlTextDidChange(_ obj: Notification) {
-        rebuildMatches()
+    private func makeRow(_ cards: [NSView]) -> NSStackView {
+        let row = NSStackView(views: cards)
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.distribution = .fillEqually
+        row.spacing = 11
+        return row
     }
 
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if commandSelector == #selector(NSResponder.cancelOperation(_:)), !searchField.stringValue.isEmpty {
-            searchField.stringValue = ""
-            rebuildMatches()
-            return true
+    private func makeCard(_ section: SyntaxSection) -> NSView {
+        let card = NSBox()
+        card.boxType = .custom
+        card.borderWidth = 1
+        card.borderColor = .separatorColor
+        card.fillColor = .controlBackgroundColor
+        card.cornerRadius = 10
+        card.contentViewMargins = NSSize(width: 13, height: 12)
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.contentView?.addSubview(stack)
+
+        let title = NSTextField(labelWithString: section.title)
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = .controlAccentColor
+        stack.addArrangedSubview(title)
+
+        let example = NSTextField(wrappingLabelWithString: section.example)
+        example.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        example.textColor = .labelColor
+        example.isSelectable = true
+        example.maximumNumberOfLines = 0
+        example.lineBreakMode = .byWordWrapping
+        example.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        stack.addArrangedSubview(example)
+        example.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        if let details = section.details {
+            let note = NSTextField(wrappingLabelWithString: details)
+            note.font = .systemFont(ofSize: 10.5)
+            note.textColor = .secondaryLabelColor
+            note.maximumNumberOfLines = 0
+            note.lineBreakMode = .byWordWrapping
+            note.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            stack.addArrangedSubview(note)
+            note.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
-        return false
+
+        let buttonRows = NSStackView()
+        buttonRows.orientation = .vertical
+        buttonRows.alignment = .leading
+        buttonRows.spacing = 5
+        for start in stride(from: 0, to: section.templates.count, by: 2) {
+            let templates = Array(section.templates[start..<min(start + 2, section.templates.count)])
+            let buttons = templates.map { template -> NSButton in
+                let button = SyntaxCopyButton(template: template, target: self, action: #selector(copyTemplate(_:)))
+                button.bezelStyle = .rounded
+                button.controlSize = .small
+                button.font = .systemFont(ofSize: 10.5, weight: .medium)
+                if firstCopyButton == nil { firstCopyButton = button }
+                return button
+            }
+            let row = NSStackView(views: buttons)
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 5
+            buttonRows.addArrangedSubview(row)
+        }
+        stack.addArrangedSubview(buttonRows)
+
+        if let contentView = card.contentView {
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+                stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+                stack.topAnchor.constraint(equalTo: contentView.topAnchor),
+                stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
+            ])
+        }
+        return card
     }
 
-    @objc private func searchSubmitted(_ sender: Any?) {
-        let backwards = NSApp.currentEvent?.modifierFlags.contains(.shift) == true
-        moveResult(by: backwards ? -1 : 1)
-    }
-
-    @objc private func previousResult(_ sender: Any?) { moveResult(by: -1) }
-    @objc private func nextResult(_ sender: Any?) { moveResult(by: 1) }
-
-    private func rebuildMatches() {
-        guard let storage = guideView.textStorage else { return }
-        let fullRange = NSRange(location: 0, length: storage.length)
-        storage.removeAttribute(.backgroundColor, range: fullRange)
-        matches.removeAll()
-        currentMatch = 0
-
-        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
-            resultLabel.stringValue = ""
+    @objc private func copyTemplate(_ sender: SyntaxCopyButton) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.setString(sender.templateText, forType: .string) else {
+            feedbackLabel.stringValue = "复制失败，请重试"
             return
         }
-
-        let source = storage.string as NSString
-        var searchRange = NSRange(location: 0, length: source.length)
-        while searchRange.length > 0 {
-            let found = source.range(of: query, options: [.caseInsensitive, .diacriticInsensitive], range: searchRange)
-            guard found.location != NSNotFound else { break }
-            matches.append(found)
-            let nextLocation = found.location + max(found.length, 1)
-            guard nextLocation <= source.length else { break }
-            searchRange = NSRange(location: nextLocation, length: source.length - nextLocation)
+        sender.title = "已复制"
+        sender.contentTintColor = .systemGreen
+        feedbackLabel.stringValue = "已复制 \(sender.defaultTitle.dropFirst(2))，回正文按 ⌘V 粘贴"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { [weak sender] in
+            guard let sender else { return }
+            sender.title = sender.defaultTitle
+            sender.contentTintColor = nil
         }
-
-        for range in matches {
-            storage.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.58), range: range)
-        }
-        showCurrentMatch()
-    }
-
-    private func moveResult(by offset: Int) {
-        guard !matches.isEmpty else { return }
-        currentMatch = (currentMatch + offset + matches.count) % matches.count
-        showCurrentMatch()
-    }
-
-    private func showCurrentMatch() {
-        guard let storage = guideView.textStorage else { return }
-        for range in matches {
-            storage.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.58), range: range)
-        }
-        guard !matches.isEmpty else {
-            resultLabel.stringValue = "0 / 0"
-            return
-        }
-        let active = matches[currentMatch]
-        storage.addAttribute(.backgroundColor, value: NSColor.systemOrange.withAlphaComponent(0.86), range: active)
-        guideView.scrollRangeToVisible(active)
-        resultLabel.stringValue = "\(currentMatch + 1) / \(matches.count)"
     }
 }
 
-final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, WKNavigationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate {
+final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, NSSearchFieldDelegate, WKNavigationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate {
     var onClose: (() -> Void)?
     private(set) var fileURL: URL?
     private var lastSavedText = ""
@@ -608,6 +738,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private var syntaxPopover: NSPopover?
     private var syntaxGuideController: SyntaxGuideViewController?
     private var copyFeedbackWorkItem: DispatchWorkItem?
+    private var documentFindMatches: [NSRange] = []
+    private var documentFindIndex = 0
+    private var documentFindCount = 0
+    private var documentFindGeneration = 0
+    private var findBarHeightConstraint: NSLayoutConstraint!
     private var activeFormatTool: InlineFormatTool?
     private var isApplyingSplitLayout = false
     private var editorOnRight = UserDefaults.standard.bool(forKey: "LightMarkEditorOnRight")
@@ -635,6 +770,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let copyButton = NSButton(title: "", target: nil, action: nil)
     private let titleLabel = NSTextField(labelWithString: "未命名")
     private let statusLabel = NSTextField(labelWithString: "")
+    private let findBar = NSVisualEffectView()
+    private let findField = NSSearchField()
+    private let findCountLabel = NSTextField(labelWithString: "0 / 0")
+    private let findPreviousButton = NSButton(title: "↑", target: nil, action: nil)
+    private let findNextButton = NSButton(title: "↓", target: nil, action: nil)
+    private let findCloseButton = NSButton(title: "×", target: nil, action: nil)
     private let previousButton = NSButton(title: "‹", target: nil, action: nil)
     private let nextButton = NSButton(title: "›", target: nil, action: nil)
     private let positionLabel = NSTextField(labelWithString: "")
@@ -643,6 +784,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let formattingHint = NSTextField(labelWithString: "先选中文字再点按钮，或先开启画笔再拖选")
     private let highlightButton = NSButton(title: "黄色高光", target: nil, action: nil)
     private let redTextButton = NSButton(title: "红色笔", target: nil, action: nil)
+    private let indentInsertButton = NSButton(title: "&emsp;&emsp;  ⌥1", target: nil, action: nil)
+    private let blankBreakInsertButton = NSButton(title: "<br><br>  ⌥2", target: nil, action: nil)
     private let paneSwapButton = NSButton(title: "⇄ 换边", target: nil, action: nil)
     private let editor = FormattingTextView()
     private let editorScroll = NSScrollView()
@@ -738,7 +881,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         syntaxButton.font = .systemFont(ofSize: 12, weight: .medium)
         syntaxButton.target = self
         syntaxButton.action = #selector(showSyntaxGuide(_:))
-        syntaxButton.toolTip = "Markdown 语法速查（⌘F 或 ⌘/）"
+        syntaxButton.toolTip = "Markdown 语法卡片（⌘/）"
         syntaxButton.translatesAutoresizingMaskIntoConstraints = false
         topBar.addSubview(syntaxButton)
 
@@ -786,6 +929,49 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         statusLabel.alignment = .right
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         topBar.addSubview(statusLabel)
+
+        findBar.material = .contentBackground
+        findBar.blendingMode = .withinWindow
+        findBar.state = .active
+        findBar.isHidden = true
+        findBar.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(findBar)
+
+        let findTitle = NSTextField(labelWithString: "查找正文")
+        findTitle.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        findTitle.textColor = .secondaryLabelColor
+        findTitle.translatesAutoresizingMaskIntoConstraints = false
+        findBar.addSubview(findTitle)
+
+        findField.placeholderString = "输入要查找的文字"
+        findField.sendsSearchStringImmediately = true
+        findField.delegate = self
+        findField.target = self
+        findField.action = #selector(findChanged(_:))
+        findField.translatesAutoresizingMaskIntoConstraints = false
+        findBar.addSubview(findField)
+
+        findCountLabel.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        findCountLabel.textColor = .secondaryLabelColor
+        findCountLabel.alignment = .center
+        findCountLabel.translatesAutoresizingMaskIntoConstraints = false
+        findBar.addSubview(findCountLabel)
+
+        for button in [findPreviousButton, findNextButton, findCloseButton] {
+            button.bezelStyle = .inline
+            button.font = .systemFont(ofSize: 12, weight: .medium)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            findBar.addSubview(button)
+        }
+        findPreviousButton.target = self
+        findPreviousButton.action = #selector(findPrevious(_:))
+        findPreviousButton.toolTip = "上一个（Shift+Enter）"
+        findNextButton.target = self
+        findNextButton.action = #selector(findNext(_:))
+        findNextButton.toolTip = "下一个（Enter）"
+        findCloseButton.target = self
+        findCloseButton.action = #selector(closeDocumentFind(_:))
+        findCloseButton.toolTip = "关闭查找（Esc）"
 
         splitView.isVertical = true
         splitView.dividerStyle = .thin
@@ -873,6 +1059,20 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             redTextButton.imagePosition = .imageLeading
         }
 
+        for button in [indentInsertButton, blankBreakInsertButton] {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.font = .monospacedSystemFont(ofSize: 10.5, weight: .medium)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            formattingBar.addSubview(button)
+        }
+        indentInsertButton.target = self
+        indentInsertButton.action = #selector(insertIndentSyntax(_:))
+        indentInsertButton.toolTip = "在光标处插入 &emsp;&emsp;（⌥1）"
+        blankBreakInsertButton.target = self
+        blankBreakInsertButton.action = #selector(insertBlankBreakSyntax(_:))
+        blankBreakInsertButton.toolTip = "在光标处插入 <br><br>（⌥2）"
+
         paneSwapButton.bezelStyle = .rounded
         paneSwapButton.controlSize = .small
         paneSwapButton.setButtonType(.toggle)
@@ -909,6 +1109,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             guard let self, self.activeFormatTool != nil else { return false }
             self.setActiveFormatTool(nil)
             return true
+        }
+        editor.onQuickInsert = { [weak self] number in
+            self?.insertQuickSyntax(number == 1 ? "&emsp;&emsp;" : "<br><br>") ?? false
         }
         editorScroll.translatesAutoresizingMaskIntoConstraints = false
         editorScroll.documentView = editor
@@ -1041,6 +1244,27 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             previousButton.centerYAnchor.constraint(equalTo: modeControl.centerYAnchor),
             previousButton.widthAnchor.constraint(equalToConstant: 26),
             previousButton.heightAnchor.constraint(equalToConstant: 28),
+            findBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            findBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            findBar.topAnchor.constraint(equalTo: topBar.bottomAnchor),
+            findTitle.leadingAnchor.constraint(equalTo: findBar.leadingAnchor, constant: 14),
+            findTitle.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+            findField.leadingAnchor.constraint(equalTo: findTitle.trailingAnchor, constant: 10),
+            findField.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+            findField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
+            findCountLabel.leadingAnchor.constraint(equalTo: findField.trailingAnchor, constant: 8),
+            findCountLabel.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+            findCountLabel.widthAnchor.constraint(equalToConstant: 54),
+            findPreviousButton.leadingAnchor.constraint(equalTo: findCountLabel.trailingAnchor, constant: 2),
+            findPreviousButton.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+            findPreviousButton.widthAnchor.constraint(equalToConstant: 28),
+            findNextButton.leadingAnchor.constraint(equalTo: findPreviousButton.trailingAnchor, constant: 2),
+            findNextButton.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+            findNextButton.widthAnchor.constraint(equalToConstant: 28),
+            findCloseButton.leadingAnchor.constraint(equalTo: findNextButton.trailingAnchor, constant: 2),
+            findCloseButton.trailingAnchor.constraint(equalTo: findBar.trailingAnchor, constant: -12),
+            findCloseButton.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+            findCloseButton.widthAnchor.constraint(equalToConstant: 28),
             formattingBar.leadingAnchor.constraint(equalTo: editorContainer.leadingAnchor),
             formattingBar.trailingAnchor.constraint(equalTo: editorContainer.trailingAnchor),
             formattingBar.topAnchor.constraint(equalTo: editorContainer.topAnchor),
@@ -1049,7 +1273,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             highlightButton.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
             redTextButton.leadingAnchor.constraint(equalTo: highlightButton.trailingAnchor, constant: 6),
             redTextButton.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
-            formattingHint.leadingAnchor.constraint(equalTo: redTextButton.trailingAnchor, constant: 10),
+            indentInsertButton.leadingAnchor.constraint(equalTo: redTextButton.trailingAnchor, constant: 9),
+            indentInsertButton.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
+            indentInsertButton.widthAnchor.constraint(equalToConstant: 112),
+            blankBreakInsertButton.leadingAnchor.constraint(equalTo: indentInsertButton.trailingAnchor, constant: 5),
+            blankBreakInsertButton.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
+            blankBreakInsertButton.widthAnchor.constraint(equalToConstant: 96),
+            formattingHint.leadingAnchor.constraint(equalTo: blankBreakInsertButton.trailingAnchor, constant: 8),
             formattingHint.trailingAnchor.constraint(lessThanOrEqualTo: paneSwapButton.leadingAnchor, constant: -8),
             formattingHint.centerYAnchor.constraint(equalTo: formattingBar.centerYAnchor),
             paneSwapButton.trailingAnchor.constraint(equalTo: formattingBar.trailingAnchor, constant: -10),
@@ -1095,9 +1325,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
             imageScroll.bottomAnchor.constraint(equalTo: imageViewer.bottomAnchor),
             documentAreaSplitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             documentAreaSplitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            documentAreaSplitView.topAnchor.constraint(equalTo: topBar.bottomAnchor),
+            documentAreaSplitView.topAnchor.constraint(equalTo: findBar.bottomAnchor),
             documentAreaSplitView.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
+
+        findBarHeightConstraint = findBar.heightAnchor.constraint(equalToConstant: 0)
+        findBarHeightConstraint.isActive = true
 
         editorContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         webView.widthAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
@@ -1204,6 +1437,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         nextButton.setAccessibilityLabel(imageMode ? "下一张" : "下一篇")
 
         if imageMode {
+            closeDocumentFind(nil)
             sidebarMode = .images
         } else if sidebarMode == .images {
             sidebarMode = .documents
@@ -1604,6 +1838,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         window?.isDocumentEdited = hasUnsavedChanges
         statusLabel.stringValue = hasUnsavedChanges ? "有未保存修改" : "已保存"
         refreshDocumentOutline()
+        if !findBar.isHidden { refreshDocumentFind(restart: false) }
         renderWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.renderPreview() }
         renderWorkItem = item
@@ -1612,6 +1847,186 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     @objc private func useHighlightTool(_ sender: NSButton) { handleFormatTool(.highlight) }
     @objc private func useRedTextTool(_ sender: NSButton) { handleFormatTool(.redText) }
+    @objc private func insertIndentSyntax(_ sender: Any?) { _ = insertQuickSyntax("&emsp;&emsp;") }
+    @objc private func insertBlankBreakSyntax(_ sender: Any?) { _ = insertQuickSyntax("<br><br>") }
+
+    @discardableResult
+    private func insertQuickSyntax(_ text: String) -> Bool {
+        guard currentContentKind == .markdown, currentMode != .reading else { return false }
+        let selection = editor.selectedRange()
+        editor.insertText(text, replacementRange: selection)
+        editor.setSelectedRange(NSRange(location: selection.location + (text as NSString).length, length: 0))
+        formattingHint.stringValue = "已插入 \(text) · ⌘Z 可撤销"
+        window?.makeFirstResponder(editor)
+        return true
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === findField else { return false }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            closeDocumentFind(nil)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            let backwards = NSApp.currentEvent?.modifierFlags.contains(.shift) == true
+            stepDocumentFind(by: backwards ? -1 : 1)
+            return true
+        }
+        return false
+    }
+
+    @objc private func findChanged(_ sender: Any?) { refreshDocumentFind(restart: true) }
+
+    fileprivate func shouldRefreshDocumentFind(after event: NSEvent) -> Bool {
+        guard !findBar.isHidden, window?.firstResponder === findField.currentEditor() else { return false }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard !modifiers.contains(.command), !modifiers.contains(.control) else { return false }
+        return ![36, 48, 53, 76, 123, 124, 125, 126].contains(event.keyCode)
+    }
+
+    fileprivate func refreshDocumentFindAfterTyping() {
+        refreshDocumentFind(restart: true)
+    }
+
+    @objc private func findPrevious(_ sender: Any?) { stepDocumentFind(by: -1) }
+    @objc private func findNext(_ sender: Any?) { stepDocumentFind(by: 1) }
+
+    @objc func showDocumentFind(_ sender: Any?) {
+        guard currentContentKind == .markdown else {
+            NSSound.beep()
+            return
+        }
+        syntaxPopover?.close()
+        if findBar.isHidden {
+            findBar.isHidden = false
+            findBarHeightConstraint.constant = 42
+            window?.contentView?.layoutSubtreeIfNeeded()
+        }
+        refreshDocumentFind(restart: documentFindCount == 0)
+        window?.makeFirstResponder(findField)
+        findField.selectText(nil)
+    }
+
+    @objc private func closeDocumentFind(_ sender: Any?) {
+        guard !findBar.isHidden else { return }
+        findBarHeightConstraint.constant = 0
+        findBar.isHidden = true
+        clearEditorFindHighlights()
+        documentFindMatches.removeAll()
+        documentFindIndex = 0
+        documentFindCount = 0
+        updateDocumentFindControls()
+        clearPreviewFindHighlights()
+        if currentMode == .reading {
+            window?.makeFirstResponder(webView)
+        } else {
+            window?.makeFirstResponder(editor)
+        }
+    }
+
+    private func stepDocumentFind(by offset: Int) {
+        guard documentFindCount > 0 else { return }
+        documentFindIndex = (documentFindIndex + offset + documentFindCount) % documentFindCount
+        refreshDocumentFind(restart: false)
+    }
+
+    private func refreshDocumentFind(restart: Bool) {
+        let query = findField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if restart { documentFindIndex = 0 }
+        documentFindMatches = textMatches(in: editor.string, query: query)
+        clearEditorFindHighlights()
+
+        guard !query.isEmpty else {
+            documentFindCount = 0
+            documentFindIndex = 0
+            updateDocumentFindControls()
+            clearPreviewFindHighlights()
+            return
+        }
+
+        if currentMode != .reading {
+            applyEditorFindHighlights()
+        }
+
+        guard currentMode != .editing, webReady else {
+            documentFindCount = documentFindMatches.count
+            if documentFindCount > 0 { documentFindIndex %= documentFindCount }
+            updateDocumentFindControls()
+            return
+        }
+
+        documentFindGeneration += 1
+        let generation = documentFindGeneration
+        let script = "window.lightmarkFind(\(javaScriptString(query)), \(documentFindIndex));"
+        webView.evaluateJavaScript(script) { [weak self] value, _ in
+            guard let self, generation == self.documentFindGeneration else { return }
+            let result = value as? [String: Any]
+            let count = (result?["count"] as? NSNumber)?.intValue ?? 0
+            let index = (result?["index"] as? NSNumber)?.intValue ?? 0
+            self.documentFindCount = count
+            self.documentFindIndex = count > 0 ? index : 0
+            self.updateDocumentFindControls()
+        }
+    }
+
+    private func textMatches(in text: String, query: String) -> [NSRange] {
+        guard !query.isEmpty else { return [] }
+        let source = text as NSString
+        var matches: [NSRange] = []
+        var searchRange = NSRange(location: 0, length: source.length)
+        while searchRange.length > 0 {
+            let found = source.range(
+                of: query,
+                options: [.caseInsensitive, .diacriticInsensitive],
+                range: searchRange
+            )
+            guard found.location != NSNotFound else { break }
+            matches.append(found)
+            let nextLocation = found.location + max(found.length, 1)
+            guard nextLocation <= source.length else { break }
+            searchRange = NSRange(location: nextLocation, length: source.length - nextLocation)
+        }
+        return matches
+    }
+
+    private func clearEditorFindHighlights() {
+        let fullRange = NSRange(location: 0, length: (editor.string as NSString).length)
+        editor.layoutManager?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: fullRange)
+    }
+
+    private func applyEditorFindHighlights() {
+        guard let layoutManager = editor.layoutManager, !documentFindMatches.isEmpty else { return }
+        let activeIndex = documentFindIndex % documentFindMatches.count
+        for (index, range) in documentFindMatches.enumerated() {
+            let color = index == activeIndex
+                ? NSColor.systemOrange.withAlphaComponent(0.9)
+                : NSColor.systemYellow.withAlphaComponent(0.58)
+            layoutManager.addTemporaryAttribute(.backgroundColor, value: color, forCharacterRange: range)
+        }
+        editor.scrollRangeToVisible(documentFindMatches[activeIndex])
+    }
+
+    private func clearPreviewFindHighlights() {
+        guard webReady else { return }
+        documentFindGeneration += 1
+        webView.evaluateJavaScript("window.lightmarkFind('', 0);")
+    }
+
+    private func updateDocumentFindControls() {
+        findCountLabel.stringValue = documentFindCount > 0
+            ? "\(documentFindIndex + 1) / \(documentFindCount)"
+            : "0 / 0"
+        findPreviousButton.isEnabled = documentFindCount > 0
+        findNextButton.isEnabled = documentFindCount > 0
+    }
+
+    private func javaScriptString(_ string: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [string]),
+              var json = String(data: data, encoding: .utf8) else { return "\"\"" }
+        json.removeFirst()
+        json.removeLast()
+        return json
+    }
 
     private func handleFormatTool(_ tool: InlineFormatTool) {
         if let activeFormatTool {
@@ -1702,7 +2117,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         let followEditor = currentMode == .split
             ? "requestAnimationFrame(() => { const e = document.scrollingElement; const max = Math.max(0, e.scrollHeight - innerHeight); window.scrollTo(0, max * \(editorViewportRatio())); });"
             : ""
-        webView.evaluateJavaScript("window.lightmarkRender(\(json)); window.lightmarkSetScale(\(fontScale)); \(followEditor)")
+        webView.evaluateJavaScript("window.lightmarkRender(\(json)); window.lightmarkSetScale(\(fontScale)); \(followEditor)") { [weak self] _, _ in
+            guard let self, !self.findBar.isHidden, self.currentMode != .editing else { return }
+            self.refreshDocumentFind(restart: false)
+        }
     }
 
     private func editorViewportRatio() -> CGFloat {
@@ -1740,6 +2158,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
         }
         if mode != .editing { renderPreview() }
         if mode == .editing { window?.makeFirstResponder(editor) }
+        if !findBar.isHidden { refreshDocumentFind(restart: false) }
     }
 
     @objc func showReading(_ sender: Any?) { applyMode(.reading) }
@@ -1788,112 +2207,23 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     @objc func showSyntaxGuide(_ sender: Any?) {
         guard currentContentKind == .markdown else { return }
+        if !findBar.isHidden { closeDocumentFind(nil) }
         if syntaxPopover?.isShown == true {
-            syntaxGuideController?.focusSearch()
+            syntaxGuideController?.focusFirstAction()
             return
         }
 
         let popover = NSPopover()
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 450, height: 570)
+        popover.contentSize = NSSize(width: 680, height: 650)
 
-        let guideText = """
-        标题
-        # 一级标题
-        ## 二级标题
-        ### 三级标题
-        #### 四级标题
-
-        文字
-        **粗体**
-        *斜体*
-        ~~删除线~~
-        `行内代码`
-
-        黄色高光
-        <mark>需要高光的文字</mark>
-
-        红色文字
-        <span class="text-red">红色文字</span>
-
-        段落、换行与中文段首
-        第一段文字
-
-        第二段文字（中间空一整行就是新段落）
-        行尾加两个半角空格再回车，只换行、不分段
-        　　中文段首可输入两个全角空格
-        注意：行首 4 个半角空格会变成代码块，不是首行缩进
-
-        列表
-        - 无序列表
-        1. 有序列表
-        - [ ] 未完成任务
-        - [x] 已完成任务
-
-        引用与分隔线
-        > 引用内容
-        ---
-
-        链接和图片
-        [显示文字](https://example.com)
-        ![图片说明](images/photo.png)
-
-        代码块
-        ```swift
-        let message = "Hello"
-        ```
-
-        表格
-        | 名称 | 数值 |
-        | --- | --- |
-        | 示例 | 100 |
-
-        Obsidian Callout
-        > [!note] 提示标题
-        > 这里填写提示内容
-
-        > [!warning] 注意
-        > 这里填写警告内容
-
-        完整 Callout 类型与别名
-        note
-        abstract / summary / tldr
-        info
-        todo
-        tip / hint / important
-        success / check / done
-        question / help / faq
-        warning / caution / attention
-        failure / fail / missing
-        danger / error
-        bug
-        example
-        quote / cite
-
-        可折叠 Callout
-        > [!faq]- 默认收起
-        > 点击标题后显示内容
-
-        > [!tip]+ 默认展开
-        > 点击标题后收起内容
-
-        嵌套 Callout
-        > [!question] 外层 Callout
-        > > [!todo] 内层 Callout
-        > > 这里填写嵌套内容
-
-        Obsidian Wiki Link
-        [[文档名称]]
-        [[文档名称|显示文字]]
-        """
-
-        let controller = SyntaxGuideViewController(guideText: guideText)
+        let controller = SyntaxGuideViewController()
         popover.contentViewController = controller
         let anchor = (sender as? NSView) ?? syntaxButton
         popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
         syntaxPopover = popover
         syntaxGuideController = controller
-        DispatchQueue.main.async { controller.focusSearch() }
+        DispatchQueue.main.async { controller.focusFirstAction() }
     }
 
     @objc func copyMarkdownSource(_ sender: Any?) {

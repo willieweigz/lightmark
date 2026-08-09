@@ -20,6 +20,8 @@
   a:hover { text-decoration:underline; }
   strong { font-weight:650; }
   mark { color:#211d12; background:#fff0a8; border-radius:.2em; padding:.04em .14em; box-decoration-break:clone; -webkit-box-decoration-break:clone; }
+  mark.lightmark-find-match { color:inherit; background:#ffe36a; border-radius:.18em; padding:0 .04em; box-shadow:0 0 0 1px color-mix(in srgb,#c98b00 28%,transparent); }
+  mark.lightmark-find-current { color:#211d12; background:#ffad42; box-shadow:0 0 0 2px color-mix(in srgb,#b96100 52%,transparent); }
   .text-red { color:#c73532; }
   @media (prefers-color-scheme: dark) { .text-red { color:#ff7974; } }
   blockquote { margin:1.25em 0; padding:.25em 1.1em; border-left:4px solid #aaa; color:var(--muted); }
@@ -126,6 +128,54 @@
     }
     flush(); return out;
   }
+  function clearFindMatches() {
+    const parents=new Set();
+    document.querySelectorAll('mark.lightmark-find-match').forEach(mark => {
+      const parent=mark.parentNode;
+      parents.add(parent);
+      mark.replaceWith(document.createTextNode(mark.textContent || ''));
+    });
+    parents.forEach(parent => parent?.normalize());
+  }
+  window.lightmarkFind = (query,index=0) => {
+    clearFindMatches();
+    const needle=String(query || '').trim();
+    if (!needle) return {count:0,index:0};
+    const page=document.getElementById('page');
+    const nodes=[];
+    const walker=document.createTreeWalker(page,NodeFilter.SHOW_TEXT,{acceptNode(node) {
+      if (!node.nodeValue?.trim()) return NodeFilter.FILTER_REJECT;
+      const parent=node.parentElement;
+      if (!parent || parent.closest('script,style,textarea')) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }});
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    const foldedNeedle=needle.toLocaleLowerCase('zh-CN');
+    nodes.forEach(node => {
+      const text=node.nodeValue || '';
+      const folded=text.toLocaleLowerCase('zh-CN');
+      let cursor=0,found=folded.indexOf(foldedNeedle);
+      if (found<0) return;
+      const fragment=document.createDocumentFragment();
+      while (found>=0) {
+        if (found>cursor) fragment.append(document.createTextNode(text.slice(cursor,found)));
+        const mark=document.createElement('mark');
+        mark.className='lightmark-find-match';
+        mark.textContent=text.slice(found,found+needle.length);
+        fragment.append(mark);
+        cursor=found+needle.length;
+        found=folded.indexOf(foldedNeedle,cursor);
+      }
+      if (cursor<text.length) fragment.append(document.createTextNode(text.slice(cursor)));
+      node.replaceWith(fragment);
+    });
+    const matches=[...page.querySelectorAll('mark.lightmark-find-match')];
+    if (!matches.length) return {count:0,index:0};
+    const active=((Number(index)||0)%matches.length+matches.length)%matches.length;
+    matches[active].classList.add('lightmark-find-current');
+    matches[active].scrollIntoView({block:'center',behavior:'auto'});
+    return {count:matches.length,index:active};
+  };
   window.lightmarkRender = md => {
     const fm=frontmatter(md);
     const html=fm.head+renderBlocks(fm.body);
