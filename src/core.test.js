@@ -18,6 +18,7 @@ import {
   preferredOpenDirectory,
   renderEditorDecorations,
   sortDocuments,
+  suggestedNewDocumentPath,
   supportedFileKind,
 } from "./core.js";
 
@@ -63,6 +64,16 @@ describe("Markdown document helpers", () => {
     assert.equal(preferredOpenDirectory(currentDirectory), currentDirectory);
     assert.equal(preferredOpenDirectory(null), undefined);
     assert.equal(preferredOpenDirectory("   "), undefined);
+  });
+
+  it("suggests a new Markdown file beside the current Chinese Windows document", () => {
+    assert.equal(
+      suggestedNewDocumentPath("G:\\微云同步文件夹\\课程 资料"),
+      "G:\\微云同步文件夹\\课程 资料\\新建文档.md",
+    );
+    assert.equal(suggestedNewDocumentPath("C:\\"), "C:\\新建文档.md");
+    assert.equal(suggestedNewDocumentPath("/Users/jd/资料/"), "/Users/jd/资料/新建文档.md");
+    assert.equal(suggestedNewDocumentPath(null), "新建文档.md");
   });
 
   it("finds document text case-insensitively in reading order", () => {

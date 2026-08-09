@@ -21,6 +21,13 @@ export function preferredOpenDirectory(currentDirectory) {
   return typeof currentDirectory === "string" && currentDirectory.trim() ? currentDirectory : undefined;
 }
 
+export function suggestedNewDocumentPath(currentDirectory, fileName = "新建文档.md") {
+  const directory = preferredOpenDirectory(currentDirectory);
+  if (!directory) return fileName;
+  const separator = directory.includes("\\") ? "\\" : "/";
+  return `${directory.replace(/[\\/]+$/, "")}${separator}${fileName}`;
+}
+
 export function sortDocuments(documents, locale = "zh-CN") {
   const collator = new Intl.Collator(locale, {
     numeric: true,

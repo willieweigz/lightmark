@@ -181,7 +181,10 @@ fn read_image(path: String) -> Result<ImagePayload, String> {
 
 #[tauri::command]
 fn write_document(path: String, contents: String) -> Result<(), String> {
-    let destination = PathBuf::from(&path);
+    write_markdown(Path::new(&path), &contents)
+}
+
+fn write_markdown(destination: &Path, contents: &str) -> Result<(), String> {
     if !is_markdown(&destination) {
         return Err("保存路径必须使用 .md 或 .markdown 扩展名。".into());
     }
@@ -308,8 +311,12 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{image_mime, is_image};
-    use std::path::Path;
+    use super::{image_mime, is_image, write_markdown};
+    use std::{
+        fs,
+        path::Path,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn accepts_common_raster_images_case_insensitively() {
@@ -324,5 +331,26 @@ mod tests {
         assert_eq!(image_mime(Path::new("可能包含脚本.svg")), None);
         assert!(!is_image(Path::new("说明.txt")));
         assert!(!is_image(Path::new("无扩展名")));
+    }
+
+    #[test]
+    fn creates_and_reads_back_a_blank_markdown_document_on_disk() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("lightmark-new-document-{unique}"));
+        fs::create_dir(&directory).expect("create temporary test directory");
+        let document = directory.join("中文 新建文档.md");
+
+        write_markdown(&document, "").expect("create blank Markdown document");
+        assert!(document.is_file());
+        assert_eq!(
+            fs::read_to_string(&document).expect("read created document"),
+            ""
+        );
+
+        fs::remove_file(&document).expect("remove exact temporary document");
+        fs::remove_dir(&directory).expect("remove exact temporary directory");
     }
 }

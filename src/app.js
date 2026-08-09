@@ -21,10 +21,12 @@ import {
   preferredOpenDirectory,
   renderEditorDecorations,
   sortDocuments,
+  suggestedNewDocumentPath,
   supportedFileKind,
 } from "./core.js";
 
 const elements = {
+  newFile: document.querySelector("#new-file"),
   openFile: document.querySelector("#open-file"),
   openFolder: document.querySelector("#open-folder"),
   saveFile: document.querySelector("#save-file"),
@@ -743,6 +745,20 @@ async function chooseFolder() {
     }
     await openSupportedPath(selectedPath);
   });
+}
+
+async function createDocument() {
+  const path = await save({
+    title: "新建 Markdown 文档",
+    defaultPath: suggestedNewDocumentPath(state.currentDirectory),
+    filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+  });
+  if (typeof path !== "string") return false;
+  await invoke("write_document", { path, contents: "" });
+  await loadDocument(path, { refreshSiblings: true });
+  setMode("editing");
+  elements.editor.focus();
+  return true;
 }
 
 async function saveDocument() {
@@ -1896,6 +1912,7 @@ elements.editor.addEventListener("mouseup", () => {
   }
   updateAiContextSummary();
 });
+elements.newFile.addEventListener("click", () => guardUnsaved(createDocument).catch((error) => showError("无法新建文档", error)));
 elements.openFile.addEventListener("click", () => chooseFile().catch((error) => showError("无法打开文件", error)));
 elements.openFolder.addEventListener("click", () => chooseFolder().catch((error) => showError("无法打开文件夹", error)));
 elements.saveFile.addEventListener("click", () => saveDocument().catch((error) => showError("无法保存文件", error)));
@@ -2117,6 +2134,11 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "F11") {
     event.preventDefault();
     toggleFullscreen().catch((error) => showError("无法切换全屏幕", error));
+    return;
+  }
+  if (control && !event.shiftKey && event.key.toLocaleLowerCase() === "n") {
+    event.preventDefault();
+    guardUnsaved(createDocument).catch((error) => showError("无法新建文档", error));
     return;
   }
   if (control && event.key.toLocaleLowerCase() === "s") {
