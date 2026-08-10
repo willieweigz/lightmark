@@ -176,7 +176,8 @@
     });
   }
   window.lightmarkSetHeadingFolds = indexes => applyHeadingFolds(indexes);
-  window.lightmarkRender = (md,foldedHeadings=[]) => {
+  window.lightmarkRender = (md,foldedHeadings=[],options={}) => {
+    marked.setOptions({gfm:true,breaks:options.naturalLineBreaks===true});
     const fm=frontmatter(md);
     const html=fm.head+renderBlocks(fm.body);
     const page=document.getElementById('page');

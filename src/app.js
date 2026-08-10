@@ -36,6 +36,7 @@ const elements = {
   pageIndicator: document.querySelector("#page-indicator"),
   modeSwitcher: document.querySelector("#mode-switcher"),
   modeButtons: [...document.querySelectorAll("[data-mode]")],
+  lineBreakToggle: document.querySelector("#line-break-toggle"),
   themeToggle: document.querySelector("#theme-toggle"),
   syntaxHelp: document.querySelector("#syntax-help"),
   fullscreenToggle: document.querySelector("#fullscreen-toggle"),
@@ -142,6 +143,7 @@ const state = {
   pendingAction: null,
   formatTool: null,
   theme: localStorage.getItem("lightmark-theme") || "system",
+  lineBreakMode: localStorage.getItem("lightmark-line-break-mode") === "natural" ? "natural" : "standard",
   editorSide: localStorage.getItem("lightmark-editor-side") === "right" ? "right" : "left",
   editorSplitRatio: Math.min(0.75, Math.max(0.25, Number(localStorage.getItem("lightmark-editor-split-ratio")) || 0.44)),
   sidebarWidth: Math.min(420, Math.max(190, Number(localStorage.getItem("lightmark-sidebar-width")) || 268)),
@@ -306,7 +308,9 @@ async function renderPreview() {
   if (!state.rendererReady) return;
   const generation = ++state.renderGeneration;
   const previewWindow = elements.preview.contentWindow;
-  previewWindow.lightmarkRender(elements.editor.value, collapsedHeadingIndices());
+  previewWindow.lightmarkRender(elements.editor.value, collapsedHeadingIndices(), {
+    naturalLineBreaks: state.lineBreakMode === "natural",
+  });
   rebuildScrollAnchors();
   syncPreviewToEditor();
 
@@ -532,6 +536,7 @@ function setContentKind(kind) {
   elements.contentPanes.hidden = imageMode;
   elements.imageViewer.hidden = !imageMode;
   elements.modeSwitcher.hidden = imageMode;
+  elements.lineBreakToggle.disabled = imageMode;
   elements.saveFile.disabled = imageMode;
   elements.saveAs.disabled = imageMode;
   elements.copyMenuToggle.disabled = imageMode || !state.currentPath;
@@ -1395,6 +1400,22 @@ function cycleTheme() {
   applyTheme(themes[(themes.indexOf(state.theme) + 1) % themes.length]);
 }
 
+function applyLineBreakMode(mode, { refresh = true } = {}) {
+  state.lineBreakMode = mode === "natural" ? "natural" : "standard";
+  localStorage.setItem("lightmark-line-break-mode", state.lineBreakMode);
+  const natural = state.lineBreakMode === "natural";
+  elements.lineBreakToggle.textContent = natural ? "换行：自然" : "换行：标准";
+  elements.lineBreakToggle.setAttribute("aria-pressed", String(natural));
+  elements.lineBreakToggle.title = natural
+    ? "自然换行：编辑区按一次回车，阅读与预览也换行"
+    : "标准 Markdown：单次回车不强制换行";
+  if (refresh) renderPreview();
+}
+
+function toggleLineBreakMode() {
+  applyLineBreakMode(state.lineBreakMode === "natural" ? "standard" : "natural");
+}
+
 function updateCopyAvailability() {
   const noDocument = !state.currentPath || state.contentKind !== "markdown";
   elements.copyMenuToggle.disabled = noDocument;
@@ -2041,6 +2062,7 @@ elements.splitResizer.addEventListener("keydown", (event) => {
   setSplitFromLeftWidth(nextLeft, { persist: true });
 });
 elements.themeToggle.addEventListener("click", cycleTheme);
+elements.lineBreakToggle.addEventListener("click", toggleLineBreakMode);
 elements.fullscreenToggle.addEventListener("click", () => toggleFullscreen().catch((error) => showError("无法切换全屏幕", error)));
 elements.syntaxHelp.addEventListener("click", showSyntaxGuide);
 elements.copyMenuToggle.addEventListener("click", () => setCopyMenu(elements.copyMenu.hidden));
@@ -2226,6 +2248,7 @@ getCurrentWindow().onCloseRequested((event) => {
 async function start() {
   restoreImageZoomPreference();
   applyTheme(state.theme);
+  applyLineBreakMode(state.lineBreakMode, { refresh: false });
   initializeSyntaxCopyButtons();
   renderEditorOverlay();
   updateCopyAvailability();
