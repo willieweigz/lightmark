@@ -9,7 +9,9 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 
+mod anydoc_markdown;
 mod codex;
+mod document_import;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +29,19 @@ struct DocumentPayload {
     contents: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImagePayload {
+    name: String,
+    path: String,
+    directory: String,
+    data_url: String,
+    mime_type: String,
+    byte_size: u64,
+}
+
+const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
+
 fn path_string(path: &Path) -> String {
     let value = path.to_string_lossy();
     if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
@@ -40,6 +55,33 @@ fn is_markdown(path: &Path) -> bool {
         .and_then(|value| value.to_str())
         .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown"))
         .unwrap_or(false)
+}
+
+fn image_mime(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("webp") => Some("image/webp"),
+        Some("gif") => Some("image/gif"),
+        Some("bmp") => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+fn is_image(path: &Path) -> bool {
+    image_mime(path).is_some()
+}
+
+fn canonical_image(path: &Path) -> Result<PathBuf, String> {
+    if !is_image(path) {
+        return Err("只支持 PNG、JPG、JPEG、WebP、GIF 和 BMP 图片。".into());
+    }
+    path.canonicalize().map_err(|error| error.to_string())
 }
 
 fn canonical_markdown(path: &Path) -> Result<PathBuf, String> {
@@ -73,6 +115,29 @@ fn list_markdown_files(directory_path: String) -> Result<Vec<DocumentEntry>, Str
 }
 
 #[tauri::command]
+fn list_image_files(directory_path: String) -> Result<Vec<DocumentEntry>, String> {
+    let directory = PathBuf::from(directory_path)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !directory.is_dir() {
+        return Err("所选路径不是文件夹。".into());
+    }
+
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if path.is_file() && is_image(&path) {
+            files.push(DocumentEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: path_string(&path),
+            });
+        }
+    }
+    Ok(files)
+}
+
+#[tauri::command]
 fn read_document(path: String) -> Result<DocumentPayload, String> {
     let canonical = canonical_markdown(Path::new(&path))?;
     let directory = canonical.parent().ok_or("无法确定文档所在文件夹。")?;
@@ -93,8 +158,35 @@ fn read_document(path: String) -> Result<DocumentPayload, String> {
 }
 
 #[tauri::command]
+fn read_image(path: String) -> Result<ImagePayload, String> {
+    let canonical = canonical_image(Path::new(&path))?;
+    let directory = canonical.parent().ok_or("无法确定图片所在文件夹。")?;
+    let metadata = fs::metadata(&canonical).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_IMAGE_BYTES {
+        return Err("图片超过 50 MB，未加载。".into());
+    }
+    let mime_type = image_mime(&canonical).ok_or("不支持这种图片格式。")?;
+    let bytes = fs::read(&canonical).map_err(|error| error.to_string())?;
+    Ok(ImagePayload {
+        name: canonical
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        path: path_string(&canonical),
+        directory: path_string(directory),
+        data_url: format!("data:{mime_type};base64,{}", STANDARD.encode(bytes)),
+        mime_type: mime_type.to_owned(),
+        byte_size: metadata.len(),
+    })
+}
+
+#[tauri::command]
 fn write_document(path: String, contents: String) -> Result<(), String> {
-    let destination = PathBuf::from(&path);
+    write_markdown(Path::new(&path), &contents)
+}
+
+fn write_markdown(destination: &Path, contents: &str) -> Result<(), String> {
     if !is_markdown(&destination) {
         return Err("保存路径必须使用 .md 或 .markdown 扩展名。".into());
     }
@@ -180,7 +272,10 @@ fn startup_paths() -> Vec<String> {
     std::env::args_os()
         .skip(1)
         .map(|value| PathBuf::from(value).to_string_lossy().into_owned())
-        .filter(|value| is_markdown(Path::new(value)))
+        .filter(|value| {
+            let path = Path::new(value);
+            is_markdown(path) || is_image(path) || document_import::is_importable(path)
+        })
         .collect()
 }
 
@@ -199,11 +294,15 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             list_markdown_files,
+            list_image_files,
             read_document,
+            read_image,
             write_document,
             read_relative_image,
             resolve_markdown_link,
             startup_paths,
+            document_import::import_document,
+            document_import::save_imported_document,
             codex::codex_status,
             codex::codex_connect,
             codex::codex_ask,
@@ -212,4 +311,50 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running LightMark");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{image_mime, is_image, write_markdown};
+    use std::{
+        fs,
+        path::Path,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn accepts_common_raster_images_case_insensitively() {
+        assert_eq!(image_mime(Path::new("照片.JPG")), Some("image/jpeg"));
+        assert_eq!(image_mime(Path::new("图表.webp")), Some("image/webp"));
+        assert!(is_image(Path::new("动画.GIF")));
+        assert!(is_image(Path::new("扫描.bmp")));
+    }
+
+    #[test]
+    fn rejects_svg_and_unrelated_files() {
+        assert_eq!(image_mime(Path::new("可能包含脚本.svg")), None);
+        assert!(!is_image(Path::new("说明.txt")));
+        assert!(!is_image(Path::new("无扩展名")));
+    }
+
+    #[test]
+    fn creates_and_reads_back_a_blank_markdown_document_on_disk() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("lightmark-new-document-{unique}"));
+        fs::create_dir(&directory).expect("create temporary test directory");
+        let document = directory.join("中文 新建文档.md");
+
+        write_markdown(&document, "").expect("create blank Markdown document");
+        assert!(document.is_file());
+        assert_eq!(
+            fs::read_to_string(&document).expect("read created document"),
+            ""
+        );
+
+        fs::remove_file(&document).expect("remove exact temporary document");
+        fs::remove_dir(&directory).expect("remove exact temporary directory");
+    }
 }

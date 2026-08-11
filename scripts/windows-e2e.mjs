@@ -179,11 +179,17 @@ assert(await editor.inputValue() === beforeQuickInsert, "Ctrl+Z 没有撤销快�
 await editor.press("Alt+Digit1");
 assert((await editor.inputValue()).endsWith("&emsp;&emsp;"), "Alt+1 没有插入 &emsp;&emsp;");
 await editor.press("Control+z");
+await page.locator("#line-break-insert").click();
+assert((await editor.inputValue()).endsWith("<br>"), "快捷按钮没有插入单个 <br>");
+await editor.press("Control+z");
+await editor.press("Alt+Digit3");
+assert((await editor.inputValue()).endsWith("<br>"), "Alt+3 没有插入单个 <br>");
+await editor.press("Control+z");
 await editor.press("Alt+Digit2");
 assert((await editor.inputValue()).endsWith("<br><br>"), "Alt+2 没有插入 <br><br>");
 await editor.press("Control+z");
-assert(await editor.inputValue() === beforeQuickInsert, "Alt+1 / Alt+2 插入后无法完整撤销");
-record("编辑区原位高光/红字、原始代码可见、快捷按钮、Alt+1/Alt+2 与 Ctrl+Z/Ctrl+Y");
+assert(await editor.inputValue() === beforeQuickInsert, "Alt+1 / Alt+2 / Alt+3 插入后无法完整撤销");
+record("编辑区原位高光/红字、原始代码可见、快捷按钮、Alt+1/Alt+2/Alt+3 与 Ctrl+Z/Ctrl+Y");
   await page.getByRole("button", { name: "分栏" }).click();
   await preview.locator("mark", { hasText: "黄色高光测试" }).waitFor();
   await preview.locator(".text-red", { hasText: "红色文字测试" }).waitFor();
@@ -220,6 +226,60 @@ record("编辑区原位高光/红字、原始代码可见、快捷按钮、Alt+1
   assert(await editor.evaluate((element) => element.value.slice(element.selectionStart).startsWith("## GFM 排版")), "分栏编辑时点击目录没有把光标带到对应标题");
   await page.locator("#documents-tab").click();
   record("分栏编辑时目录点击同步定位光标与预览");
+
+  const beforeHeadingFoldText = await editor.inputValue();
+  const headingFoldFixture = [
+    "",
+    "### 折叠三级甲",
+    "三级正文",
+    "",
+    "#### 折叠四级甲",
+    "四级正文",
+    "",
+    "##### 折叠五级",
+    "五级正文",
+    "",
+    "###### 折叠六级",
+    "六级正文",
+    "",
+    "#### 折叠四级乙",
+    "同级四级正文",
+    "",
+    "### 折叠三级乙",
+    "同级三级正文",
+  ].join("\n");
+  await editor.evaluate((element, fixture) => {
+    element.value += fixture;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  }, headingFoldFixture);
+  await preview.locator("h6", { hasText: "折叠六级" }).waitFor();
+  await page.locator("#outline-tab").click();
+  const fourAlphaRow = page.locator("#outline-list .outline-row").filter({ hasText: "折叠四级甲" });
+  const fourBetaRow = page.locator("#outline-list .outline-row").filter({ hasText: "折叠四级乙" });
+  const fiveRow = page.locator("#outline-list .outline-row").filter({ hasText: "折叠五级" });
+  await fourAlphaRow.locator(".outline-fold-toggle").click();
+  assert(await fiveRow.isHidden(), "目录收起四级标题后仍显示五级标题");
+  assert(await fourBetaRow.isVisible(), "收起四级标题错误隐藏了下一个同级四级标题");
+  assert(await preview.locator("h5", { hasText: "折叠五级" }).isHidden(), "目录收起没有同步隐藏正文中的五级标题");
+  assert(await preview.getByText("五级正文", { exact: true }).isHidden(), "目录收起没有同步隐藏五级正文");
+  assert(await preview.locator("h4", { hasText: "折叠四级乙" }).isVisible(), "正文收起错误隐藏了下一个同级标题");
+
+  await preview.locator("h4", { hasText: "折叠四级甲" }).locator(".heading-fold-toggle").click();
+  assert(await fiveRow.isVisible(), "正文展开没有同步恢复目录中的五级标题");
+  await preview.locator("h3", { hasText: "折叠三级甲" }).locator(".heading-fold-toggle").click();
+  assert(await fourAlphaRow.isHidden() && await fourBetaRow.isHidden(), "三级标题没有收起其下全部四至六级标题");
+  const threeAlphaRow = page.locator("#outline-list .outline-row").filter({ hasText: "折叠三级甲" });
+  assert(await threeAlphaRow.locator(".outline-fold-toggle").getAttribute("aria-expanded") === "false", "正文收起没有同步更新目录箭头");
+  await threeAlphaRow.locator(".outline-fold-toggle").click();
+  assert(await preview.locator("h4", { hasText: "折叠四级甲" }).isVisible(), "目录展开没有同步恢复正文内容");
+  assert(await preview.locator(".heading-fold-toggle").count() >= 8, "正文没有为各级标题提供收放箭头");
+
+  await editor.evaluate((element, original) => {
+    element.value = original;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  }, beforeHeadingFoldText);
+  await page.locator("#documents-tab").click();
+  record("一至六级标题按层级收放，正文与本文目录双向同步");
 const highlightStyle = await preview.locator("mark", { hasText: "黄色高光测试" }).evaluate((element) => {
   const style = getComputedStyle(element);
   return { background: style.backgroundColor, color: style.color };

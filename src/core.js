@@ -1,8 +1,44 @@
 export const markdownExtensions = ["md", "markdown"];
+export const imageExtensions = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+export const documentImportExtensions = [
+  "doc", "docx", "docm",
+  "ppt", "pps", "pot", "pptx", "pptm", "ppsx", "ppsm",
+  "xls", "xlsx", "xlsm", "xlsb",
+  "odt", "ods", "odp",
+  "rtf", "epub", "csv", "pdf",
+];
 
 export function isMarkdownName(name) {
   const extension = name.split(".").pop()?.toLocaleLowerCase();
   return markdownExtensions.includes(extension);
+}
+
+export function isImageName(name) {
+  const extension = name.split(".").pop()?.toLocaleLowerCase();
+  return imageExtensions.includes(extension);
+}
+
+export function isDocumentImportName(name) {
+  const extension = name.split(".").pop()?.toLocaleLowerCase();
+  return documentImportExtensions.includes(extension);
+}
+
+export function supportedFileKind(name) {
+  if (isMarkdownName(name)) return "markdown";
+  if (isImageName(name)) return "image";
+  if (isDocumentImportName(name)) return "import";
+  return null;
+}
+
+export function preferredOpenDirectory(currentDirectory) {
+  return typeof currentDirectory === "string" && currentDirectory.trim() ? currentDirectory : undefined;
+}
+
+export function suggestedNewDocumentPath(currentDirectory, fileName = "新建文档.md") {
+  const directory = preferredOpenDirectory(currentDirectory);
+  if (!directory) return fileName;
+  const separator = directory.includes("\\") ? "\\" : "/";
+  return `${directory.replace(/[\\/]+$/, "")}${separator}${fileName}`;
 }
 
 export function sortDocuments(documents, locale = "zh-CN") {
@@ -164,6 +200,27 @@ export function extractHeadings(source) {
     lineNumber += 1;
   }
   return headings;
+}
+
+export function buildHeadingSections(headings) {
+  const occurrences = new Map();
+  return headings.map((heading, index) => {
+    const signature = `${heading.level}\u0000${heading.title}`;
+    const occurrence = (occurrences.get(signature) || 0) + 1;
+    occurrences.set(signature, occurrence);
+    let endIndex = headings.length;
+    for (let nextIndex = index + 1; nextIndex < headings.length; nextIndex += 1) {
+      if (headings[nextIndex].level <= heading.level) {
+        endIndex = nextIndex;
+        break;
+      }
+    }
+    return {
+      ...heading,
+      foldKey: `${signature}\u0000${occurrence}`,
+      endIndex,
+    };
+  });
 }
 
 const inlineFormats = Object.freeze({

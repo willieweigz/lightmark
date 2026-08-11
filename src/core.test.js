@@ -2,18 +2,26 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   applyTextCompletion,
+  buildHeadingSections,
   directoryFromPath,
+  documentImportExtensions,
   extractHeadings,
   findHtmlCompletionContext,
   findTextMatches,
   fileNameFromPath,
   formatSelection,
+  imageExtensions,
   isExternalUrl,
+  isImageName,
+  isDocumentImportName,
   isMarkdownName,
   isRelativeImageSource,
   mapScrollByAnchors,
+  preferredOpenDirectory,
   renderEditorDecorations,
   sortDocuments,
+  suggestedNewDocumentPath,
+  supportedFileKind,
 } from "./core.js";
 
 describe("Markdown document helpers", () => {
@@ -36,10 +44,48 @@ describe("Markdown document helpers", () => {
     assert.equal(isMarkdownName("notes.txt"), false);
   });
 
+  it("recognizes the supported local image formats without treating SVG as executable content", () => {
+    assert.deepEqual(imageExtensions, ["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+    assert.equal(isImageName("照片.JPG"), true);
+    assert.equal(isImageName("插图.webp"), true);
+    assert.equal(isImageName("动画.GIF"), true);
+    assert.equal(isImageName("图标.svg"), false);
+    assert.equal(supportedFileKind("章节.md"), "markdown");
+    assert.equal(supportedFileKind("封面.png"), "image");
+    assert.equal(supportedFileKind("说明.txt"), null);
+  });
+
+  it("recognizes office, ebook, table, and text PDF files as import sources", () => {
+    assert.ok(documentImportExtensions.includes("docx"));
+    assert.ok(documentImportExtensions.includes("pptx"));
+    assert.ok(documentImportExtensions.includes("xlsx"));
+    assert.equal(isDocumentImportName("中文 课程.DOCX"), true);
+    assert.equal(isDocumentImportName("电子书.epub"), true);
+    assert.equal(supportedFileKind("讲义.pdf"), "import");
+    assert.equal(isDocumentImportName("普通图片.png"), false);
+  });
+
   it("handles Windows paths with drives, spaces, and Chinese characters", () => {
     const path = "D:\\资料 归档\\中文目录\\01-开始.md";
     assert.equal(fileNameFromPath(path), "01-开始.md");
     assert.equal(directoryFromPath(path), "D:\\资料 归档\\中文目录");
+  });
+
+  it("opens file dialogs from the current image or document directory", () => {
+    const currentDirectory = "G:\\微云同步文件夹\\obsidian\\RAW 健康\\肠胃 30讲";
+    assert.equal(preferredOpenDirectory(currentDirectory), currentDirectory);
+    assert.equal(preferredOpenDirectory(null), undefined);
+    assert.equal(preferredOpenDirectory("   "), undefined);
+  });
+
+  it("suggests a new Markdown file beside the current Chinese Windows document", () => {
+    assert.equal(
+      suggestedNewDocumentPath("G:\\微云同步文件夹\\课程 资料"),
+      "G:\\微云同步文件夹\\课程 资料\\新建文档.md",
+    );
+    assert.equal(suggestedNewDocumentPath("C:\\"), "C:\\新建文档.md");
+    assert.equal(suggestedNewDocumentPath("/Users/jd/资料/"), "/Users/jd/资料/新建文档.md");
+    assert.equal(suggestedNewDocumentPath(null), "新建文档.md");
   });
 
   it("finds document text case-insensitively in reading order", () => {
@@ -100,6 +146,30 @@ describe("Markdown document helpers", () => {
     assert.deepEqual(extractHeadings("---\ntitle: 不应成为标题\ntags: [测试]\n---\n# 正文标题\n"), [
       { level: 1, title: "正文标题", offset: 33, line: 4 },
     ]);
+  });
+
+  it("builds stable fold sections for every heading level", () => {
+    const headings = extractHeadings([
+      "# 一级",
+      "## 二级",
+      "#### 四级",
+      "##### 五级",
+      "###### 六级",
+      "#### 四级",
+      "## 二级",
+    ].join("\n"));
+    const sections = buildHeadingSections(headings);
+    assert.deepEqual(sections.map(({ level, endIndex }) => [level, endIndex]), [
+      [1, 7],
+      [2, 6],
+      [4, 5],
+      [5, 5],
+      [6, 5],
+      [4, 6],
+      [2, 7],
+    ]);
+    assert.notEqual(sections[1].foldKey, sections[6].foldKey);
+    assert.notEqual(sections[2].foldKey, sections[5].foldKey);
   });
 
   it("adds and removes yellow highlight markup around selected text", () => {

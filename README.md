@@ -19,7 +19,7 @@ Windows 与 macOS 版本独立更新。表格会分别指向两个平台当前�
 
 1. 下载 `LightMark_Windows_x64_Setup.exe` 并运行。
 2. 安装完成后，从开始菜单打开“轻阅 Markdown”。
-3. 也可以右键 `.md` 或 `.markdown` 文件，选择“打开方式 → 轻阅 Markdown”。
+3. 也可以右键 `.md`、`.markdown` 或常见图片文件，选择“打开方式 → 轻阅 Markdown”。
 
 安装包目前没有商业代码签名。如果 Windows SmartScreen 提示“Windows 已保护你的电脑”，请确认文件来自本仓库，然后选择“更多信息 → 仍要运行”。
 
@@ -42,19 +42,27 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 
 ## 功能
 
+- Windows 可用顶部“新建”或 `Ctrl+N` 选择位置并立即创建空白 Markdown；新文件会加入当前文件夹列表并直接进入编辑模式
+- Windows 顶部“导入”可将 Word、PowerPoint、Excel、OpenDocument、RTF、EPUB、CSV 和文字型 PDF 在本机离线转换为 Markdown；先预览再保存，不修改源文件
+- 导入文档中的 PNG、JPG、GIF、WebP 与 BMP 内嵌图片会在保存 Markdown 时写入同名 `.assets` 文件夹；能识别阅读位置的图片保留在对应段落或幻灯片附近，确实无法定位的图片才放到文末
+- Windows 可在“换行：标准 / 换行：自然”之间切换；自然换行会让单次回车在阅读和预览中显示为换行，选择会被记住，但不会改写 Markdown 原文
 - 阅读、编辑、实时分栏预览三种模式
 - 分栏模式可一键交换编辑区与预览区；文档列表和中间分隔条均可拖动，并记住上次宽度与位置
 - 分栏编辑可选择“自动锚点 / 手动校准 / 关闭同步”；手动移动预览后会保留位置差，也可随时“重新对齐”
 - 长文档在普通窗口、Windows 最大化和全屏幕下都会占满可用内容高度
 - 编辑工具栏提供浅黄色高光和红色文字笔；可先选中文字再点击，也可先开启画笔再拖选文字；编辑区也会直接显示标记效果，同时保留原始 Markdown 代码
-- Windows 编辑工具栏可一键插入 `&emsp;&emsp;` 和 `<br><br>`，也可使用 `Alt+1`、`Alt+2`
+- Windows 编辑工具栏可一键插入 `&emsp;&emsp;`、单个 `<br>` 和 `<br><br>`，也可使用 `Alt+1`、`Alt+3`、`Alt+2`
 - 编辑时输入 `<` 会出现受控的安全候选，可插入 `<br>`、`<br><br>`、黄色高光和红色文字格式
 - Windows 提供 Markdown 原文、纯文本和富文本三种整篇复制；富文本可粘贴到 Word 等应用并保留排版
 - Windows 支持工具栏或 F11 进入全屏幕，并用 Ctrl+F 查找当前文档文字
 - Windows 提供可收起、可调宽度的 Codex 助读侧栏，可针对整篇文章或选中文字连续提问；回答方式可选“只依据原文 / 自然回答 / 联网查证”
+- Windows 可直接打开 PNG、JPG/JPEG、WebP、GIF 和 BMP 图片；同文件夹图片会自然排序并在左侧高亮，可用列表、顶部按钮或 ← / → 连续查看
+- Windows 图片阅读支持适合窗口、原始大小、按钮或滚轮缩放，以及拖动查看大图；会记住上次选择的缩放方式和百分比，切换图片时从顶部开始
+- Windows“打开文件”和“打开文件夹”会从当前图片或文档所在目录开始；图片只在本机读取，不会发送给 Codex
 - 打开单个 `.md` / `.markdown`，或打开整个文件夹
 - 自动列出同文件夹第一层 Markdown，按文件名自然排序
-- 左侧可切换“文档 / 本文目录”；目录按标题层级缩进，点击即可在阅读或编辑位置跳转
+- Windows 左侧可切换“图片 / 文档 / 本文目录”；目录按标题层级缩进，点击即可在阅读或编辑位置跳转
+- 一至六级标题均提供收放箭头；收起任意标题会隐藏其正文和所有下级标题，直到下一个同级或更高层级标题，正文与“本文目录”双向同步
 - 可收起文档列表、当前文档高亮、顶部显示当前位置与总数
 - 阅读模式使用 ← / → 连续翻阅；编辑模式方向键只移动光标
 - 保存、另存为、未保存修改保护和拖放打开
@@ -64,13 +72,14 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 - YAML Frontmatter 折叠显示、`[[Wiki Link]]` 友好显示
 - Markdown 语法速查提供可直接复制的格式模板，包含完整 Callout，以及只复制符号本身的 `&emsp;&emsp;`、两个全角空格、`<br>` 和 `<br><br>`
 - 跟随系统浅色/深色外观；Windows 还可临时切换主题
-- Windows 单实例运行，并注册 `.md` / `.markdown`“打开方式”
+- Windows 单实例运行，并注册 `.md` / `.markdown` 以及 PNG、JPG/JPEG、WebP、GIF、BMP 的“打开方式”
 - marked 与 DOMPurify 随应用打包，全程离线渲染
 
 ## 快捷键
 
 | 操作 | Windows | macOS |
 | --- | --- | --- |
+| 新建 Markdown 文档 | `Ctrl+N` | — |
 | 打开文件 | `Ctrl+O` | `⌘O` |
 | 打开文件夹 | `Ctrl+Shift+O` | `⇧⌘O` |
 | 保存 | `Ctrl+S` | `⌘S` |
@@ -79,6 +88,7 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 | 复制选中文字 | `Ctrl+C` | `⌘C` |
 | 插入 `&emsp;&emsp;` | `Alt+1` | — |
 | 插入 `<br><br>` | `Alt+2` | — |
+| 插入单个 `<br>` | `Alt+3` | — |
 | 复制整篇 Markdown 原文 | `Ctrl+Shift+C` | `⇧⌘C` |
 | 复制纯文本 / 富文本 | 工具栏“复制”菜单 | — |
 | 显示或隐藏文档列表 | `Ctrl+\` | `⌘\` |
@@ -86,6 +96,8 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 | 打开语法速查 | `Ctrl+/` | `⌘F` 或 `⌘/` |
 | 进入或退出全屏幕 | `F11` | `⌃⌘F` |
 | 阅读模式上一篇 / 下一篇 | `←` / `→` | `←` / `→` |
+| 图片上一张 / 下一张 | `←` / `→` | — |
+| 图片放大 / 缩小 / 适合窗口 | `+` / `-` / `0` | — |
 
 ## 安全与离线
 
@@ -93,6 +105,9 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 - 渲染结果经过 DOMPurify 清理
 - 禁止 Markdown 中的脚本和事件处理器执行
 - 远程图片默认阻止；相对路径图片由应用从本地读取
+- 独立图片阅读只允许明确支持的常见位图格式，单张上限 50 MB；不加载可能包含脚本的 SVG
+- 文档导入由内置 AnyDoc 在本机完成，不上传文件；单个源文件上限 100 MB，转换后的 Markdown 上限 25 MB，并遵守 AnyDoc 的解压、嵌套和资源安全限制
+- 扫描或纯图片 PDF 没有可直接提取的文字，需要 OCR，当前离线导入会明确提示而不会伪造结果
 - 外部链接交给系统默认浏览器打开
 
 ### Windows Codex 助读（可选）
@@ -125,7 +140,7 @@ npm run tauri dev
 npm run tauri build
 ```
 
-生产构建会在 `src-tauri/target/release/bundle/nsis/` 生成当前用户安装的 `.exe`。安装器会注册 `.md` 与 `.markdown` 文件类型；如果目标电脑缺少 WebView2，安装器会调用微软官方引导程序安装系统运行时。
+生产构建会在 `src-tauri/target/release/bundle/nsis/` 生成当前用户安装的 `.exe`。安装器会为 `.md`、`.markdown` 和支持的图片格式注册“使用轻阅 Markdown 打开”；如果目标电脑缺少 WebView2，安装器会调用微软官方引导程序安装系统运行时。
 
 ## macOS 开发与构建
 
@@ -151,6 +166,7 @@ build.sh            macOS 构建脚本
 - [marked](https://github.com/markedjs/marked) — MIT
 - [DOMPurify](https://github.com/cure53/DOMPurify) — Apache-2.0 / MPL-2.0
 - [Tauri](https://tauri.app/) — Apache-2.0 / MIT
+- [AnyDoc](https://github.com/firecrawl/anydoc) — MIT
 
 ## 开源许可证
 
