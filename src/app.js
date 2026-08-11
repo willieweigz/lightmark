@@ -708,9 +708,10 @@ async function importSourceDocument(path) {
   renderOutline();
   setFormatTool(null);
   elements.title.textContent = payload.suggestedName;
-  const imageNotice = payload.assetCount
-    ? ` · ${payload.assetCount} 张图片将在保存时提取`
-    : "";
+  const imageNotices = [];
+  if (payload.positionedAssetCount) imageNotices.push(`${payload.positionedAssetCount} 张图片已按内容定位`);
+  if (payload.appendedAssetCount) imageNotices.push(`${payload.appendedAssetCount} 张图片无法定位，将放在文末`);
+  const imageNotice = imageNotices.length ? ` · ${imageNotices.join(" · ")}` : "";
   const skippedNotice = payload.skippedAssetCount
     ? ` · ${payload.skippedAssetCount} 个不支持的内嵌对象仅保留文字`
     : "";
@@ -872,6 +873,8 @@ async function saveDocumentAs() {
   if (importResult?.extractedAssetCount || importResult?.skippedAssetCount) {
     const details = [];
     if (importResult.extractedAssetCount) details.push(`已保存 ${importResult.extractedAssetCount} 张内嵌图片`);
+    if (importResult.positionedAssetCount) details.push(`${importResult.positionedAssetCount} 张位于对应内容附近`);
+    if (importResult.appendedAssetCount) details.push(`${importResult.appendedAssetCount} 张无法定位并放在文末`);
     if (importResult.skippedAssetCount) details.push(`${importResult.skippedAssetCount} 个不支持的内嵌对象只保留了文字`);
     await message(details.join("；") + "。", { title: "导入完成", kind: "info" });
   }

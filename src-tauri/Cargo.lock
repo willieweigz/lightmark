@@ -2303,10 +2303,12 @@ version = "0.5.4"
 dependencies = [
  "anydoc",
  "base64 0.22.1",
+ "log",
  "mime_guess",
  "percent-encoding",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

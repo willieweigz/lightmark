@@ -7,6 +7,7 @@ LightMark bundles the following libraries for offline Markdown rendering:
 - [AnyDoc](https://github.com/firecrawl/anydoc), version 0.1.8, MIT License. Copyright (c) 2026 Sideguide Technologies Inc.
 
 Copyright and license notices are retained in the bundled JavaScript files under `Resources/`.
+LightMark includes a modified copy of AnyDoc 0.1.8's Markdown renderer under `src-tauri/src/anydoc_markdown/`; the modification resolves embedded image assets to local relative paths while preserving their reading position.
 
 AnyDoc is distributed under the MIT License:
 

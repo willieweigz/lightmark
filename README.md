@@ -44,7 +44,7 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 
 - Windows 可用顶部“新建”或 `Ctrl+N` 选择位置并立即创建空白 Markdown；新文件会加入当前文件夹列表并直接进入编辑模式
 - Windows 顶部“导入”可将 Word、PowerPoint、Excel、OpenDocument、RTF、EPUB、CSV 和文字型 PDF 在本机离线转换为 Markdown；先预览再保存，不修改源文件
-- 导入文档中的 PNG、JPG、GIF、WebP 与 BMP 内嵌图片会在保存 Markdown 时写入同名 `.assets` 文件夹，并在文末生成可继续查看的相对图片链接
+- 导入文档中的 PNG、JPG、GIF、WebP 与 BMP 内嵌图片会在保存 Markdown 时写入同名 `.assets` 文件夹；能识别阅读位置的图片保留在对应段落或幻灯片附近，确实无法定位的图片才放到文末
 - Windows 可在“换行：标准 / 换行：自然”之间切换；自然换行会让单次回车在阅读和预览中显示为换行，选择会被记住，但不会改写 Markdown 原文
 - 阅读、编辑、实时分栏预览三种模式
 - 分栏模式可一键交换编辑区与预览区；文档列表和中间分隔条均可拖动，并记住上次宽度与位置

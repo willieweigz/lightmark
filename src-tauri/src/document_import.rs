@@ -1,7 +1,13 @@
-use anydoc::{model::Asset, ConvertError, Format};
+use crate::anydoc_markdown;
+use anydoc::{
+    model::{Asset, AssetId, Document},
+    ConvertError, Format,
+};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -31,6 +37,8 @@ pub struct ImportPayload {
     contents: String,
     format_label: String,
     asset_count: usize,
+    positioned_asset_count: usize,
+    appended_asset_count: usize,
     skipped_asset_count: usize,
 }
 
@@ -40,6 +48,8 @@ pub struct ImportSavePayload {
     document_path: String,
     asset_directory: Option<String>,
     extracted_asset_count: usize,
+    positioned_asset_count: usize,
+    appended_asset_count: usize,
     skipped_asset_count: usize,
 }
 
@@ -120,28 +130,89 @@ fn raster_extension(media_type: &str) -> Option<&'static str> {
     }
 }
 
-fn asset_counts(assets: &[Asset]) -> (usize, usize) {
-    let supported = assets
+fn asset_file_name(asset: &Asset) -> Option<String> {
+    let extension = raster_extension(&asset.media_type)?;
+    let digest = Sha256::digest(&asset.bytes);
+    let short_hash = digest[..6]
         .iter()
-        .filter(|asset| raster_extension(&asset.media_type).is_some())
-        .count();
-    (supported, assets.len().saturating_sub(supported))
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Some(format!(
+        "image-{:03}-{short_hash}.{extension}",
+        asset.id.0 + 1
+    ))
+}
+
+fn encoded_asset_directory(stem: &str) -> String {
+    utf8_percent_encode(&format!("{stem}.assets"), MARKDOWN_PATH_ENCODE_SET).to_string()
+}
+
+fn asset_urls(assets: &[Asset], stem: &str) -> HashMap<AssetId, String> {
+    let directory = encoded_asset_directory(stem);
+    assets
+        .iter()
+        .filter_map(|asset| {
+            asset_file_name(asset).map(|file_name| (asset.id, format!("{directory}/{file_name}")))
+        })
+        .collect()
+}
+
+fn render_document_with_assets(document: &Document, stem: &str) -> (String, usize, usize, usize) {
+    let urls = asset_urls(&document.assets, stem);
+    let asset_count = urls.len();
+    let skipped_asset_count = document.assets.len().saturating_sub(asset_count);
+    let mut contents = anydoc_markdown::document_to_markdown(document, urls.clone());
+    let mut unpositioned: Vec<_> = urls
+        .iter()
+        .filter(|(_, url)| !contents.contains(url.as_str()))
+        .collect();
+    unpositioned.sort_by_key(|(id, _)| id.0);
+    let appended_asset_count = unpositioned.len();
+    let positioned_asset_count = asset_count.saturating_sub(appended_asset_count);
+
+    if !unpositioned.is_empty() {
+        if !contents.trim().is_empty() {
+            contents = contents.trim_end().to_owned();
+            contents.push_str("\n\n---\n\n");
+        }
+        contents.push_str("## 无法定位的导入图片\n\n");
+        for (offset, (id, url)) in unpositioned.iter().enumerate() {
+            if offset > 0 {
+                contents.push_str("\n\n");
+            }
+            contents.push_str(&format!("![导入图片 {}]({url})", id.0 + 1));
+        }
+        contents.push('\n');
+    }
+
+    (
+        contents,
+        positioned_asset_count,
+        appended_asset_count,
+        skipped_asset_count,
+    )
 }
 
 fn convert_path(path: &Path) -> Result<ImportPayload, String> {
     let (canonical, bytes, format) = read_import_source(path)?;
-    let contents = anydoc::to_markdown_bytes(&bytes, format).map_err(friendly_error)?;
+    let directory = canonical.parent().ok_or("无法确定源文档所在文件夹。")?;
+    let source_stem = canonical.file_stem().unwrap_or_default().to_string_lossy();
+    let (contents, positioned_asset_count, appended_asset_count, skipped_asset_count) =
+        if format == Format::Pdf {
+            (
+                anydoc::to_markdown_bytes(&bytes, format).map_err(friendly_error)?,
+                0,
+                0,
+                0,
+            )
+        } else {
+            let document = anydoc::to_document(&bytes, format).map_err(friendly_error)?;
+            render_document_with_assets(&document, &source_stem)
+        };
     if contents.len() > MAX_MARKDOWN_BYTES {
         return Err("转换后的 Markdown 超过 25 MB，为避免界面失去响应，未打开。".into());
     }
-    let (asset_count, skipped_asset_count) = if format == Format::Pdf {
-        (0, 0)
-    } else {
-        let document = anydoc::to_document(&bytes, format).map_err(friendly_error)?;
-        asset_counts(&document.assets)
-    };
-    let directory = canonical.parent().ok_or("无法确定源文档所在文件夹。")?;
-    let source_stem = canonical.file_stem().unwrap_or_default().to_string_lossy();
+    let asset_count = positioned_asset_count + appended_asset_count;
     let suggested_name = format!("{source_stem}.md");
     let suggested_path = directory.join(&suggested_name);
     Ok(ImportPayload {
@@ -157,32 +228,10 @@ fn convert_path(path: &Path) -> Result<ImportPayload, String> {
         contents,
         format_label: format_label(format).into(),
         asset_count,
+        positioned_asset_count,
+        appended_asset_count,
         skipped_asset_count,
     })
-}
-
-fn available_asset_path(
-    directory: &Path,
-    index: usize,
-    extension: &str,
-    bytes: &[u8],
-) -> Result<PathBuf, String> {
-    let base = format!("image-{index:03}");
-    for suffix in 0..10_000usize {
-        let name = if suffix == 0 {
-            format!("{base}.{extension}")
-        } else {
-            format!("{base}-{}.{}", suffix + 1, extension)
-        };
-        let candidate = directory.join(name);
-        if !candidate.exists() {
-            return Ok(candidate);
-        }
-        if fs::read(&candidate).map_err(|error| error.to_string())? == bytes {
-            return Ok(candidate);
-        }
-    }
-    Err("无法为导入图片生成安全的文件名。".into())
 }
 
 fn save_import(
@@ -197,62 +246,76 @@ fn save_import(
     if !matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown") {
         return Err("保存路径必须使用 .md 或 .markdown 扩展名。".into());
     }
-    if contents.len() > MAX_MARKDOWN_BYTES {
-        return Err("Markdown 超过 25 MB，未保存。".into());
-    }
     let parent = path.parent().ok_or("无法确定保存文件夹。")?;
     if !parent.exists() || !parent.is_dir() {
         return Err("保存文件夹不存在。".into());
     }
 
     let (_, bytes, format) = read_import_source(source_path)?;
-    let assets = if format == Format::Pdf {
-        Vec::new()
-    } else {
-        anydoc::to_document(&bytes, format)
-            .map_err(friendly_error)?
-            .assets
-    };
-    let (_, skipped_asset_count) = asset_counts(&assets);
+    let (assets, positioned_asset_count, appended_asset_count, skipped_asset_count) =
+        if format == Format::Pdf {
+            (Vec::new(), 0, 0, 0)
+        } else {
+            let document = anydoc::to_document(&bytes, format).map_err(friendly_error)?;
+            let source_stem = source_path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy();
+            let (_, positioned, appended, skipped) =
+                render_document_with_assets(&document, &source_stem);
+            (document.assets, positioned, appended, skipped)
+        };
     let supported_assets: Vec<_> = assets
         .into_iter()
         .filter(|asset| raster_extension(&asset.media_type).is_some())
         .collect();
 
-    let mut final_contents = contents.trim_end().to_owned();
+    let source_stem = source_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let target_stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let source_directory_url = encoded_asset_directory(&source_stem);
+    let target_directory_url = encoded_asset_directory(&target_stem);
+    let mut final_contents = contents
+        .replace(
+            &format!("{source_directory_url}/"),
+            &format!("{target_directory_url}/"),
+        )
+        .trim_end()
+        .to_owned();
+    if !final_contents.is_empty() {
+        final_contents.push('\n');
+    }
+    if final_contents.len() > MAX_MARKDOWN_BYTES {
+        return Err("Markdown 超过 25 MB，未保存。".into());
+    }
+
     let mut asset_directory = None;
     let mut extracted_asset_count = 0usize;
     if !supported_assets.is_empty() {
-        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-        let directory_name = format!("{stem}.assets");
+        let directory_name = format!("{target_stem}.assets");
         let directory = parent.join(&directory_name);
         fs::create_dir_all(&directory).map_err(|error| format!("无法创建图片文件夹：{error}"))?;
-        let mut image_links = Vec::new();
-        for (offset, asset) in supported_assets.iter().enumerate() {
-            let extension = raster_extension(&asset.media_type).expect("filtered raster asset");
-            let target = available_asset_path(&directory, offset + 1, extension, &asset.bytes)?;
-            if !target.exists() {
+        for asset in &supported_assets {
+            let file_name = asset_file_name(asset).expect("filtered raster asset");
+            let target = directory.join(file_name);
+            if target.exists() {
+                let existing =
+                    fs::read(&target).map_err(|error| format!("无法检查已有导入图片：{error}"))?;
+                if existing != asset.bytes {
+                    return Err(format!(
+                        "图片文件已存在但内容不同，为避免覆盖，已停止保存：{}",
+                        target.display()
+                    ));
+                }
+            } else {
                 fs::write(&target, &asset.bytes)
                     .map_err(|error| format!("无法保存导入图片：{error}"))?;
             }
-            let file_name = target.file_name().unwrap_or_default().to_string_lossy();
-            let directory_url = utf8_percent_encode(&directory_name, MARKDOWN_PATH_ENCODE_SET);
-            let file_url = utf8_percent_encode(&file_name, MARKDOWN_PATH_ENCODE_SET);
-            image_links.push(format!(
-                "![导入图片 {}]({directory_url}/{file_url})",
-                offset + 1
-            ));
             extracted_asset_count += 1;
         }
-        if !final_contents.is_empty() {
-            final_contents.push_str("\n\n---\n\n");
-        }
-        final_contents.push_str("## 导入的图片\n\n");
-        final_contents.push_str(&image_links.join("\n\n"));
-        final_contents.push('\n');
         asset_directory = Some(path_string(&directory));
-    } else if !final_contents.is_empty() {
-        final_contents.push('\n');
     }
 
     fs::write(path, final_contents.as_bytes())
@@ -261,6 +324,8 @@ fn save_import(
         document_path: path_string(path),
         asset_directory,
         extracted_asset_count,
+        positioned_asset_count,
+        appended_asset_count,
         skipped_asset_count,
     })
 }
@@ -287,7 +352,8 @@ pub async fn save_imported_document(
 
 #[cfg(test)]
 mod tests {
-    use super::{convert_path, save_import};
+    use super::{convert_path, render_document_with_assets, save_import};
+    use anydoc::model::{Asset, AssetId, Block, Document, ImageSource, Inline};
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -343,5 +409,58 @@ mod tests {
         fs::remove_file(&source).expect("remove fixture");
         fs::remove_file(&destination).expect("remove output");
         fs::remove_dir(&directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn keeps_an_embedded_image_between_its_source_paragraphs() {
+        let document = Document {
+            blocks: vec![
+                Block::Paragraph(vec![Inline::plain("图片前面的文字")]),
+                Block::Paragraph(vec![Inline::Image {
+                    alt: "示意图".into(),
+                    source: ImageSource::Asset(AssetId(0)),
+                }]),
+                Block::Paragraph(vec![Inline::plain("图片后面的文字")]),
+            ],
+            notes: Vec::new(),
+            assets: vec![Asset {
+                id: AssetId(0),
+                media_type: "image/png".into(),
+                origin_part: "word/media/image1.png".into(),
+                bytes: vec![0x89, b'P', b'N', b'G'],
+            }],
+        };
+
+        let (markdown, positioned, appended, skipped) =
+            render_document_with_assets(&document, "中文 文档");
+        let before = markdown.find("图片前面的文字").expect("before text");
+        let image = markdown.find("![示意图]").expect("positioned image");
+        let after = markdown.find("图片后面的文字").expect("after text");
+
+        assert!(before < image && image < after, "{markdown}");
+        assert!(markdown.contains("%E4%B8%AD%E6%96%87%20%E6%96%87%E6%A1%A3.assets/"));
+        assert_eq!((positioned, appended, skipped), (1, 0, 0));
+        assert!(!markdown.contains("无法定位的导入图片"));
+    }
+
+    #[test]
+    fn appends_only_assets_without_a_reading_position() {
+        let document = Document {
+            blocks: vec![Block::Paragraph(vec![Inline::plain("正文")])],
+            notes: Vec::new(),
+            assets: vec![Asset {
+                id: AssetId(0),
+                media_type: "image/jpeg".into(),
+                origin_part: "ppt/media/image1.jpeg".into(),
+                bytes: vec![0xff, 0xd8, 0xff],
+            }],
+        };
+
+        let (markdown, positioned, appended, skipped) =
+            render_document_with_assets(&document, "演示文稿");
+
+        assert!(markdown.contains("## 无法定位的导入图片"));
+        assert!(markdown.contains("![导入图片 1]"));
+        assert_eq!((positioned, appended, skipped), (0, 1, 0));
     }
 }

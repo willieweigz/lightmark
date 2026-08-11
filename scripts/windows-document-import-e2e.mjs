@@ -6,7 +6,7 @@ const port = 14324;
 const origin = `http://127.0.0.1:${port}`;
 const sourcePath = "C:\\轻阅 导入验收\\中文 课程资料.docx";
 const outputPath = "C:\\轻阅 导入验收\\中文 课程资料.md";
-const convertedMarkdown = "# 中文课程\n\n| 课程 | 课时 |\n| --- | ---: |\n| 历史 | 10 |\n";
+const convertedMarkdown = "# 中文课程\n\n课程图片之前。\n\n![课程插图](中文%20课程资料.assets/image-001-a1b2c3d4e5f6.png)\n\n课程图片之后。\n\n| 课程 | 课时 |\n| --- | ---: |\n| 历史 | 10 |\n\n---\n\n## 无法定位的导入图片\n\n![导入图片 2](中文%20课程资料.assets/image-002-f6e5d4c3b2a1.png)\n";
 
 function assert(condition, message) {
   if (!condition) throw new Error(`验收失败：${message}`);
@@ -67,16 +67,20 @@ try {
             contents: markdown,
             formatLabel: "Word",
             assetCount: 2,
+            positionedAssetCount: 1,
+            appendedAssetCount: 1,
             skippedAssetCount: 0,
           };
         }
         if (command === "save_imported_document") {
           window.__importAcceptance.saveCalls.push(args);
-          savedMarkdown = `${args.contents.trimEnd()}\n\n---\n\n## 导入的图片\n\n![导入图片 1](中文%20课程资料.assets/image-001.png)\n`;
+          savedMarkdown = `${args.contents.trimEnd()}\n`;
           return {
             documentPath: output,
             assetDirectory: "C:\\轻阅 导入验收\\中文 课程资料.assets",
             extractedAssetCount: 2,
+            positionedAssetCount: 1,
+            appendedAssetCount: 1,
             skippedAssetCount: 0,
           };
         }
@@ -106,10 +110,14 @@ try {
   await page.getByRole("button", { name: "导入", exact: true }).click();
   await page.locator("#document-title", { hasText: "中文 课程资料.md" }).waitFor();
   assert(await page.locator("#import-badge").textContent() === "离线导入 · 2 张图", "没有显示离线导入与图片数量");
+  assert((await page.locator("#document-path").textContent()).includes("1 张图片已按内容定位"), "没有显示图片定位数量");
+  assert((await page.locator("#document-path").textContent()).includes("1 张图片无法定位"), "没有显示文末回退数量");
   assert(await page.locator("#save-status").textContent() === "离线导入预览 · Ctrl+S 保存为 Markdown", "没有提示先预览再保存");
   const preview = page.frameLocator("#preview");
   await preview.getByRole("heading", { name: "中文课程" }).waitFor();
   assert(await preview.locator("table").count() === 1, "导入后的 Markdown 表格没有正常预览");
+  assert(convertedMarkdown.indexOf("课程图片之前") < convertedMarkdown.indexOf("![课程插图]"), "定位图片跑到了前文之前");
+  assert(convertedMarkdown.indexOf("![课程插图]") < convertedMarkdown.indexOf("课程图片之后"), "定位图片跑到了后文之后");
 
   await page.keyboard.press("Control+s");
   await page.locator("#document-title", { hasText: "中文 课程资料.md" }).waitFor();
@@ -134,6 +142,8 @@ try {
     offlinePreview: true,
     headingAndTableRendered: true,
     extractedImages: 2,
+    positionedImages: 1,
+    appendedImages: 1,
     sourcePreserved: true,
     ctrlSReadback: true,
   }, null, 2));

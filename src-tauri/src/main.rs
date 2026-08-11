@@ -9,6 +9,7 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 
+mod anydoc_markdown;
 mod codex;
 mod document_import;
 
