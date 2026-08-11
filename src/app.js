@@ -9,6 +9,7 @@ import {
   applyTextCompletion,
   buildHeadingSections,
   directoryFromPath,
+  documentImportExtensions,
   extractHeadings,
   findHtmlCompletionContext,
   findTextMatches,
@@ -28,6 +29,7 @@ import {
 const elements = {
   newFile: document.querySelector("#new-file"),
   openFile: document.querySelector("#open-file"),
+  importDocument: document.querySelector("#import-document"),
   openFolder: document.querySelector("#open-folder"),
   saveFile: document.querySelector("#save-file"),
   saveAs: document.querySelector("#save-as"),
@@ -60,6 +62,7 @@ const elements = {
   emptyImages: document.querySelector("#empty-images"),
   emptyOutline: document.querySelector("#empty-outline"),
   title: document.querySelector("#document-title"),
+  importBadge: document.querySelector("#import-badge"),
   path: document.querySelector("#document-path"),
   findBar: document.querySelector("#document-find"),
   findInput: document.querySelector("#find-input"),
@@ -135,6 +138,8 @@ const state = {
   contentKind: "markdown",
   currentPath: null,
   currentDirectory: null,
+  importSourcePath: null,
+  importSuggestedPath: null,
   lastSavedText: "",
   dirty: false,
   mode: "reading",
@@ -345,16 +350,22 @@ function setDirty(dirty) {
   elements.dirtyDot.classList.toggle("visible", state.dirty);
   elements.saveStatus.textContent = state.contentKind === "image" && state.currentPath
     ? "本地图片 · 只读"
-    : state.dirty
-      ? "有未保存修改 · Ctrl+S 保存"
-      : state.currentPath
-        ? "已保存"
-        : "未打开文档";
+    : state.importSourcePath
+      ? "离线导入预览 · Ctrl+S 保存为 Markdown"
+      : state.dirty
+        ? "有未保存修改 · Ctrl+S 保存"
+        : state.currentPath
+          ? "已保存"
+          : "未打开文档";
   updateWindowTitle();
 }
 
 async function updateWindowTitle() {
-  const title = state.currentPath ? fileNameFromPath(state.currentPath) : "轻阅 Markdown";
+  const title = state.currentPath
+    ? fileNameFromPath(state.currentPath)
+    : state.importSourcePath
+      ? elements.title.textContent
+      : "轻阅 Markdown";
   document.title = `${state.dirty ? "● " : ""}${title} — 轻阅 Markdown`;
   try {
     await getCurrentWindow().setTitle(document.title);
@@ -539,7 +550,7 @@ function setContentKind(kind) {
   elements.lineBreakToggle.disabled = imageMode;
   elements.saveFile.disabled = imageMode;
   elements.saveAs.disabled = imageMode;
-  elements.copyMenuToggle.disabled = imageMode || !state.currentPath;
+  elements.copyMenuToggle.disabled = imageMode || (!state.currentPath && !state.importSourcePath);
   elements.aiToggle.disabled = imageMode;
   elements.syntaxHelp.disabled = imageMode;
   elements.previous.setAttribute("aria-label", imageMode ? "上一张" : "上一篇");
@@ -623,6 +634,13 @@ function updateImageDetails() {
   elements.imageDetails.textContent = `${state.imageNaturalWidth} × ${state.imageNaturalHeight} · ${formatFileSize(state.imageByteSize)} · ${type}`;
 }
 
+function clearImportState() {
+  state.importSourcePath = null;
+  state.importSuggestedPath = null;
+  elements.importBadge.hidden = true;
+  elements.importBadge.textContent = "离线导入";
+}
+
 async function loadImage(path, { refreshSiblings = false } = {}) {
   const previousPath = state.currentPath;
   const payload = await invoke("read_image", { path });
@@ -631,6 +649,7 @@ async function loadImage(path, { refreshSiblings = false } = {}) {
   }
   state.currentPath = payload.path;
   state.currentDirectory = payload.directory;
+  clearImportState();
   state.lastSavedText = "";
   state.imageByteSize = payload.byteSize;
   state.imageMimeType = payload.mimeType;
@@ -671,11 +690,50 @@ async function loadImage(path, { refreshSiblings = false } = {}) {
   elements.imageStage.focus({ preventScroll: true });
 }
 
+async function importSourceDocument(path) {
+  const payload = await invoke("import_document", { path });
+  await refreshDirectory(payload.directory);
+  state.currentPath = null;
+  state.currentDirectory = payload.directory;
+  state.importSourcePath = payload.sourcePath;
+  state.importSuggestedPath = payload.suggestedPath;
+  state.lastSavedText = "";
+  state.previewSyncOffset = 0;
+  state.previewProgrammaticTarget = null;
+  elements.editor.value = payload.contents;
+  state.collapsedHeadingKeys.clear();
+  setContentKind("markdown");
+  if (state.sidebarView === "images") state.sidebarView = "documents";
+  renderEditorOverlay();
+  renderOutline();
+  setFormatTool(null);
+  elements.title.textContent = payload.suggestedName;
+  const imageNotice = payload.assetCount
+    ? ` · ${payload.assetCount} 张图片将在保存时提取`
+    : "";
+  const skippedNotice = payload.skippedAssetCount
+    ? ` · ${payload.skippedAssetCount} 个不支持的内嵌对象仅保留文字`
+    : "";
+  elements.path.textContent = `${payload.formatLabel} 本机离线导入${imageNotice}${skippedNotice} · ${payload.sourcePath}`;
+  elements.importBadge.hidden = false;
+  elements.importBadge.textContent = payload.assetCount ? `离线导入 · ${payload.assetCount} 张图` : "离线导入";
+  setDirty(true);
+  setMode("reading");
+  updateSyncControls();
+  renderDocumentList();
+  await renderPreview();
+  updateCopyAvailability();
+  updateAiContextSummary();
+  updateAiControls();
+  if (!elements.findBar.hidden) refreshFindResults({ restart: true });
+}
+
 async function openSupportedPath(path, options = {}) {
   const kind = supportedFileKind(path);
   if (kind === "markdown") return loadDocument(path, options);
   if (kind === "image") return loadImage(path, options);
-  throw new Error("只支持 Markdown、PNG、JPG、JPEG、WebP、GIF 和 BMP 文件。");
+  if (kind === "import") return importSourceDocument(path);
+  throw new Error("不支持这种文件。可打开 Markdown 和图片，或导入常见办公文档、EPUB、CSV 与文字型 PDF。");
 }
 
 async function loadDocument(path, { refreshSiblings = false } = {}) {
@@ -686,6 +744,7 @@ async function loadDocument(path, { refreshSiblings = false } = {}) {
   }
   state.currentPath = payload.path;
   state.currentDirectory = payload.directory;
+  clearImportState();
   setContentKind("markdown");
   elements.imageContent.removeAttribute("src");
   state.imageNaturalWidth = 0;
@@ -730,6 +789,24 @@ async function chooseFile() {
     ],
   }));
   if (path) await guardUnsaved(() => openSupportedPath(path, { refreshSiblings: true }));
+}
+
+async function chooseImportDocument() {
+  const path = singleDialogPath(await open({
+    multiple: false,
+    directory: false,
+    title: "导入并转换为 Markdown",
+    defaultPath: preferredOpenDirectory(state.currentDirectory),
+    filters: [
+      { name: "可导入文档", extensions: documentImportExtensions },
+      { name: "Word", extensions: ["doc", "docx", "docm"] },
+      { name: "PowerPoint", extensions: ["ppt", "pps", "pot", "pptx", "pptm", "ppsx", "ppsm"] },
+      { name: "Excel 与表格", extensions: ["xls", "xlsx", "xlsm", "xlsb", "ods", "csv"] },
+      { name: "电子书与文本文档", extensions: ["epub", "rtf", "odt"] },
+      { name: "文字型 PDF", extensions: ["pdf"] },
+    ],
+  }));
+  if (path) await guardUnsaved(() => importSourceDocument(path));
 }
 
 async function chooseFolder() {
@@ -779,12 +856,25 @@ async function saveDocumentAs() {
   if (state.contentKind === "image") return false;
   const path = await save({
     title: "另存为 Markdown",
-    defaultPath: state.currentPath || "未命名.md",
+    defaultPath: state.currentPath || state.importSuggestedPath || "未命名.md",
     filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
   });
   if (typeof path !== "string") return false;
-  await invoke("write_document", { path, contents: elements.editor.value });
+  const importResult = state.importSourcePath
+    ? await invoke("save_imported_document", {
+      path,
+      sourcePath: state.importSourcePath,
+      contents: elements.editor.value,
+    })
+    : null;
+  if (!importResult) await invoke("write_document", { path, contents: elements.editor.value });
   await loadDocument(path, { refreshSiblings: true });
+  if (importResult?.extractedAssetCount || importResult?.skippedAssetCount) {
+    const details = [];
+    if (importResult.extractedAssetCount) details.push(`已保存 ${importResult.extractedAssetCount} 张内嵌图片`);
+    if (importResult.skippedAssetCount) details.push(`${importResult.skippedAssetCount} 个不支持的内嵌对象只保留了文字`);
+    await message(details.join("；") + "。", { title: "导入完成", kind: "info" });
+  }
   return true;
 }
 
@@ -1355,7 +1445,7 @@ function applyEditorFormat(tool) {
 }
 
 function insertQuickSyntax(detail) {
-  if (!state.currentPath || state.mode === "reading") return false;
+  if ((!state.currentPath && !state.importSourcePath) || state.mode === "reading") return false;
   const cursor = elements.editor.selectionStart;
   const nextText = `${elements.editor.value.slice(0, cursor)}${detail.text}${elements.editor.value.slice(cursor)}`;
   const nextCursor = cursor + detail.text.length;
@@ -1417,7 +1507,7 @@ function toggleLineBreakMode() {
 }
 
 function updateCopyAvailability() {
-  const noDocument = !state.currentPath || state.contentKind !== "markdown";
+  const noDocument = state.contentKind !== "markdown" || (!state.currentPath && !state.importSourcePath);
   elements.copyMenuToggle.disabled = noDocument;
   Object.values(quickInsertDetails).forEach(({ button }) => {
     button.disabled = noDocument || state.mode === "reading";
@@ -1518,7 +1608,7 @@ function showCopyFeedback(label) {
 }
 
 async function copyDocument(mode) {
-  if (!state.currentPath) return;
+  if (!state.currentPath && !state.importSourcePath) return;
   await renderPreview();
   const labels = { markdown: "Markdown 原文", plain: "纯文本", rich: "富文本" };
   if (mode === "markdown") await writeClipboard(elements.editor.value);
@@ -1667,7 +1757,11 @@ function setAiConnection(label, tone = "") {
 }
 
 function updateAiControls() {
-  const canAsk = state.aiReady && state.aiSignedIn && state.contentKind === "markdown" && Boolean(state.currentPath) && !state.aiBusy;
+  const canAsk = state.aiReady
+    && state.aiSignedIn
+    && state.contentKind === "markdown"
+    && Boolean(state.currentPath || state.importSourcePath)
+    && !state.aiBusy;
   const answerDetails = answerModeDetails(currentAiAnswerMode());
   elements.aiQuestion.disabled = !canAsk;
   elements.aiSend.disabled = !canAsk || !elements.aiQuestion.value.trim();
@@ -1935,6 +2029,7 @@ elements.editor.addEventListener("mouseup", () => {
 });
 elements.newFile.addEventListener("click", () => guardUnsaved(createDocument).catch((error) => showError("无法新建文档", error)));
 elements.openFile.addEventListener("click", () => chooseFile().catch((error) => showError("无法打开文件", error)));
+elements.importDocument.addEventListener("click", () => chooseImportDocument().catch((error) => showError("无法导入文档", error)));
 elements.openFolder.addEventListener("click", () => chooseFolder().catch((error) => showError("无法打开文件夹", error)));
 elements.saveFile.addEventListener("click", () => saveDocument().catch((error) => showError("无法保存文件", error)));
 elements.saveAs.addEventListener("click", () => saveDocumentAs().catch((error) => showError("无法另存文件", error)));
@@ -2235,7 +2330,7 @@ document.addEventListener("keydown", (event) => {
 
 getCurrentWebview().onDragDropEvent((event) => {
   if (event.payload.type === "drop" && event.payload.paths?.[0]) {
-    handleDroppedPath(event.payload.paths[0]);
+    handleDroppedPath(event.payload.paths[0]).catch((error) => showError("无法打开拖入项目", error));
   }
 }).catch(console.error);
 

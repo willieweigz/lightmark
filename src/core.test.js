@@ -4,6 +4,7 @@ import {
   applyTextCompletion,
   buildHeadingSections,
   directoryFromPath,
+  documentImportExtensions,
   extractHeadings,
   findHtmlCompletionContext,
   findTextMatches,
@@ -12,6 +13,7 @@ import {
   imageExtensions,
   isExternalUrl,
   isImageName,
+  isDocumentImportName,
   isMarkdownName,
   isRelativeImageSource,
   mapScrollByAnchors,
@@ -51,6 +53,16 @@ describe("Markdown document helpers", () => {
     assert.equal(supportedFileKind("章节.md"), "markdown");
     assert.equal(supportedFileKind("封面.png"), "image");
     assert.equal(supportedFileKind("说明.txt"), null);
+  });
+
+  it("recognizes office, ebook, table, and text PDF files as import sources", () => {
+    assert.ok(documentImportExtensions.includes("docx"));
+    assert.ok(documentImportExtensions.includes("pptx"));
+    assert.ok(documentImportExtensions.includes("xlsx"));
+    assert.equal(isDocumentImportName("中文 课程.DOCX"), true);
+    assert.equal(isDocumentImportName("电子书.epub"), true);
+    assert.equal(supportedFileKind("讲义.pdf"), "import");
+    assert.equal(isDocumentImportName("普通图片.png"), false);
   });
 
   it("handles Windows paths with drives, spaces, and Chinese characters", () => {

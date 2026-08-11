@@ -1,5 +1,12 @@
 export const markdownExtensions = ["md", "markdown"];
 export const imageExtensions = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+export const documentImportExtensions = [
+  "doc", "docx", "docm",
+  "ppt", "pps", "pot", "pptx", "pptm", "ppsx", "ppsm",
+  "xls", "xlsx", "xlsm", "xlsb",
+  "odt", "ods", "odp",
+  "rtf", "epub", "csv", "pdf",
+];
 
 export function isMarkdownName(name) {
   const extension = name.split(".").pop()?.toLocaleLowerCase();
@@ -11,9 +18,15 @@ export function isImageName(name) {
   return imageExtensions.includes(extension);
 }
 
+export function isDocumentImportName(name) {
+  const extension = name.split(".").pop()?.toLocaleLowerCase();
+  return documentImportExtensions.includes(extension);
+}
+
 export function supportedFileKind(name) {
   if (isMarkdownName(name)) return "markdown";
   if (isImageName(name)) return "image";
+  if (isDocumentImportName(name)) return "import";
   return null;
 }
 

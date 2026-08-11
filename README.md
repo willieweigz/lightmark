@@ -43,6 +43,8 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 ## 功能
 
 - Windows 可用顶部“新建”或 `Ctrl+N` 选择位置并立即创建空白 Markdown；新文件会加入当前文件夹列表并直接进入编辑模式
+- Windows 顶部“导入”可将 Word、PowerPoint、Excel、OpenDocument、RTF、EPUB、CSV 和文字型 PDF 在本机离线转换为 Markdown；先预览再保存，不修改源文件
+- 导入文档中的 PNG、JPG、GIF、WebP 与 BMP 内嵌图片会在保存 Markdown 时写入同名 `.assets` 文件夹，并在文末生成可继续查看的相对图片链接
 - Windows 可在“换行：标准 / 换行：自然”之间切换；自然换行会让单次回车在阅读和预览中显示为换行，选择会被记住，但不会改写 Markdown 原文
 - 阅读、编辑、实时分栏预览三种模式
 - 分栏模式可一键交换编辑区与预览区；文档列表和中间分隔条均可拖动，并记住上次宽度与位置
@@ -104,6 +106,8 @@ macOS 包目前使用临时签名，没有 Apple Developer ID 签名与公证，
 - 禁止 Markdown 中的脚本和事件处理器执行
 - 远程图片默认阻止；相对路径图片由应用从本地读取
 - 独立图片阅读只允许明确支持的常见位图格式，单张上限 50 MB；不加载可能包含脚本的 SVG
+- 文档导入由内置 AnyDoc 在本机完成，不上传文件；单个源文件上限 100 MB，转换后的 Markdown 上限 25 MB，并遵守 AnyDoc 的解压、嵌套和资源安全限制
+- 扫描或纯图片 PDF 没有可直接提取的文字，需要 OCR，当前离线导入会明确提示而不会伪造结果
 - 外部链接交给系统默认浏览器打开
 
 ### Windows Codex 助读（可选）
@@ -162,6 +166,7 @@ build.sh            macOS 构建脚本
 - [marked](https://github.com/markedjs/marked) — MIT
 - [DOMPurify](https://github.com/cure53/DOMPurify) — Apache-2.0 / MPL-2.0
 - [Tauri](https://tauri.app/) — Apache-2.0 / MIT
+- [AnyDoc](https://github.com/firecrawl/anydoc) — MIT
 
 ## 开源许可证
 

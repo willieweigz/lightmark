@@ -1,6 +1,6 @@
 [package]
 name = "lightmark"
-version = "0.5.3"
+version = "0.5.4"
 description = "轻量、离线的 Markdown 阅读与编辑器"
 authors = ["Willie Wei"]
 license = "MIT"
@@ -10,6 +10,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+anydoc = "=0.1.8"
 base64 = "0.22"
 mime_guess = "2"
 percent-encoding = "2"

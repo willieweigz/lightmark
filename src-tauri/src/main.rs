@@ -10,6 +10,7 @@ use std::{
 use tauri::{Emitter, Manager};
 
 mod codex;
+mod document_import;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -272,7 +273,7 @@ fn startup_paths() -> Vec<String> {
         .map(|value| PathBuf::from(value).to_string_lossy().into_owned())
         .filter(|value| {
             let path = Path::new(value);
-            is_markdown(path) || is_image(path)
+            is_markdown(path) || is_image(path) || document_import::is_importable(path)
         })
         .collect()
 }
@@ -299,6 +300,8 @@ fn main() {
             read_relative_image,
             resolve_markdown_link,
             startup_paths,
+            document_import::import_document,
+            document_import::save_imported_document,
             codex::codex_status,
             codex::codex_connect,
             codex::codex_ask,

@@ -146,6 +146,7 @@ textarea:focus-visible {
 .ai-toggle { border-color: color-mix(in srgb, var(--accent) 42%, var(--line)); color: var(--accent-strong); background: color-mix(in srgb, var(--accent-soft) 64%, var(--surface-elevated)); font-weight: 680; }
 .ai-toggle[aria-expanded="true"] { border-color: var(--accent); background: var(--accent); color: var(--surface); }
 .ai-spark { font-family: Georgia, serif; font-size: 13px; }
+.import-button { border-color: color-mix(in srgb, var(--accent) 42%, var(--line)); color: var(--accent-strong); background: color-mix(in srgb, var(--accent-soft) 52%, var(--surface-elevated)); }
 
 .button,
 .icon-button,
@@ -308,6 +309,8 @@ textarea:focus-visible {
 .document-heading { grid-row: 1; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 0 22px; border-bottom: 1px solid var(--line); }
 .title-stack { min-width: 0; display: flex; align-items: center; gap: 8px; }
 .document-heading h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif; font-size: 16px; font-weight: 640; }
+.import-badge { flex: none; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 999px; padding: 3px 7px; color: var(--accent-strong); background: var(--accent-soft); font-size: 9px; font-weight: 700; }
+.import-badge[hidden] { display: none; }
 .document-path { max-width: 52%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; unicode-bidi: plaintext; color: var(--muted); font-size: 11px; }
 .dirty-dot { display: none; width: 7px; height: 7px; border-radius: 50%; background: #d49a2f; box-shadow: 0 0 0 3px color-mix(in srgb, #d49a2f 16%, transparent); }
 .dirty-dot.visible { display: block; }
