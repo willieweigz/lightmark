@@ -2299,13 +2299,16 @@ dependencies = [
 
 [[package]]
 name = "lightmark"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anydoc",
  "base64 0.22.1",
  "log",
+ "lopdf",
  "mime_guess",
+ "pdf-inspector",
  "percent-encoding",
+ "png 0.17.16",
  "serde",
  "serde_json",
  "sha2",

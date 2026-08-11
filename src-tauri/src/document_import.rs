@@ -1,4 +1,4 @@
-use crate::anydoc_markdown;
+use crate::{anydoc_markdown, pdf_import};
 use anydoc::{
     model::{Asset, AssetId, Document},
     ConvertError, Format,
@@ -193,18 +193,57 @@ fn render_document_with_assets(document: &Document, stem: &str) -> (String, usiz
     )
 }
 
+fn render_pdf_with_assets(
+    extraction: &pdf_import::PdfExtraction,
+    stem: &str,
+) -> (String, usize, usize, usize) {
+    let urls = asset_urls(&extraction.assets, stem);
+    let asset_count = urls.len();
+    let mut contents = extraction.markdown.clone();
+    for (id, url) in &urls {
+        contents = contents.replace(&pdf_import::asset_token(*id), url);
+    }
+    let mut unpositioned: Vec<_> = urls
+        .iter()
+        .filter(|(_, url)| !contents.contains(url.as_str()))
+        .collect();
+    unpositioned.sort_by_key(|(id, _)| id.0);
+    let appended_asset_count = unpositioned.len();
+    let positioned_asset_count = asset_count.saturating_sub(appended_asset_count);
+    if !unpositioned.is_empty() {
+        if !contents.trim().is_empty() {
+            contents = contents.trim_end().to_owned();
+            contents.push_str("\n\n---\n\n");
+        }
+        contents.push_str("## 无法定位的导入图片\n\n");
+        for (offset, (id, url)) in unpositioned.iter().enumerate() {
+            if offset > 0 {
+                contents.push_str("\n\n");
+            }
+            contents.push_str(&format!("![导入图片 {}]({url})", id.0 + 1));
+        }
+        contents.push('\n');
+    }
+    let skipped_asset_count = extraction
+        .skipped_asset_count
+        .saturating_add(extraction.assets.len().saturating_sub(asset_count));
+
+    (
+        contents,
+        positioned_asset_count,
+        appended_asset_count,
+        skipped_asset_count,
+    )
+}
+
 fn convert_path(path: &Path) -> Result<ImportPayload, String> {
     let (canonical, bytes, format) = read_import_source(path)?;
     let directory = canonical.parent().ok_or("无法确定源文档所在文件夹。")?;
     let source_stem = canonical.file_stem().unwrap_or_default().to_string_lossy();
     let (contents, positioned_asset_count, appended_asset_count, skipped_asset_count) =
         if format == Format::Pdf {
-            (
-                anydoc::to_markdown_bytes(&bytes, format).map_err(friendly_error)?,
-                0,
-                0,
-                0,
-            )
+            let extraction = pdf_import::extract(&bytes).map_err(friendly_error)?;
+            render_pdf_with_assets(&extraction, &source_stem)
         } else {
             let document = anydoc::to_document(&bytes, format).map_err(friendly_error)?;
             render_document_with_assets(&document, &source_stem)
@@ -252,19 +291,26 @@ fn save_import(
     }
 
     let (_, bytes, format) = read_import_source(source_path)?;
-    let (assets, positioned_asset_count, appended_asset_count, skipped_asset_count) =
-        if format == Format::Pdf {
-            (Vec::new(), 0, 0, 0)
-        } else {
-            let document = anydoc::to_document(&bytes, format).map_err(friendly_error)?;
-            let source_stem = source_path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy();
-            let (_, positioned, appended, skipped) =
-                render_document_with_assets(&document, &source_stem);
-            (document.assets, positioned, appended, skipped)
-        };
+    let (assets, positioned_asset_count, appended_asset_count, skipped_asset_count) = if format
+        == Format::Pdf
+    {
+        let extraction = pdf_import::extract(&bytes).map_err(friendly_error)?;
+        let source_stem = source_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let (_, positioned, appended, skipped) = render_pdf_with_assets(&extraction, &source_stem);
+        (extraction.assets, positioned, appended, skipped)
+    } else {
+        let document = anydoc::to_document(&bytes, format).map_err(friendly_error)?;
+        let source_stem = source_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let (_, positioned, appended, skipped) =
+            render_document_with_assets(&document, &source_stem);
+        (document.assets, positioned, appended, skipped)
+    };
     let supported_assets: Vec<_> = assets
         .into_iter()
         .filter(|asset| raster_extension(&asset.media_type).is_some())
@@ -353,6 +399,7 @@ pub async fn save_imported_document(
 #[cfg(test)]
 mod tests {
     use super::{convert_path, render_document_with_assets, save_import};
+    use crate::pdf_import;
     use anydoc::model::{Asset, AssetId, Block, Document, ImageSource, Inline};
     use std::{
         fs,
@@ -462,5 +509,51 @@ mod tests {
         assert!(markdown.contains("## 无法定位的导入图片"));
         assert!(markdown.contains("![导入图片 1]"));
         assert_eq!((positioned, appended, skipped), (0, 1, 0));
+    }
+
+    #[test]
+    fn saves_a_pdf_image_to_disk_at_its_reading_position() {
+        let directory = temporary_directory("save-pdf-image");
+        let source = directory.join("source with image.pdf");
+        let destination = directory.join("imported document.md");
+        let source_bytes = pdf_import::test_pdf_with_image();
+        fs::write(&source, &source_bytes).expect("write PDF fixture");
+
+        let payload = convert_path(&source).expect("convert PDF fixture");
+        assert_eq!(payload.asset_count, 1);
+        assert_eq!(payload.positioned_asset_count, 1);
+        let before = payload.contents.find("Before image").expect("before text");
+        let image = payload
+            .contents
+            .find("source%20with%20image.assets/")
+            .expect("relative image URL");
+        let after = payload.contents.find("After image").expect("after text");
+        assert!(before < image && image < after, "{}", payload.contents);
+
+        let result = save_import(&destination, &source, &payload.contents)
+            .expect("save imported PDF Markdown");
+        assert_eq!(result.extracted_asset_count, 1);
+        assert_eq!(result.positioned_asset_count, 1);
+        assert_eq!(result.appended_asset_count, 0);
+        assert_eq!(result.skipped_asset_count, 0);
+        assert_eq!(fs::read(&source).expect("read source again"), source_bytes);
+
+        let markdown = fs::read_to_string(&destination).expect("read saved Markdown");
+        assert!(markdown.contains("imported%20document.assets/image-001-"));
+        let asset_directory = directory.join("imported document.assets");
+        let assets = fs::read_dir(&asset_directory)
+            .expect("read asset directory")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read asset entries");
+        assert_eq!(assets.len(), 1);
+        assert!(fs::read(assets[0].path())
+            .expect("read extracted image")
+            .starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        fs::remove_file(&source).expect("remove fixture");
+        fs::remove_file(&destination).expect("remove Markdown output");
+        fs::remove_file(assets[0].path()).expect("remove extracted image");
+        fs::remove_dir(&asset_directory).expect("remove asset directory");
+        fs::remove_dir(&directory).expect("remove temporary directory");
     }
 }

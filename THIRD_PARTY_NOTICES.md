@@ -5,6 +5,9 @@ LightMark bundles the following libraries for offline Markdown rendering:
 - [marked](https://github.com/markedjs/marked), version 16.2.1, MIT License.
 - [DOMPurify](https://github.com/cure53/DOMPurify), version 3.2.6, Apache-2.0 or MPL-2.0.
 - [AnyDoc](https://github.com/firecrawl/anydoc), version 0.1.8, MIT License. Copyright (c) 2026 Sideguide Technologies Inc.
+- [pdf-inspector](https://github.com/firecrawl/pdf-inspector), version 0.1.8, MIT License.
+- [lopdf](https://github.com/J-F-Liu/lopdf), version 0.42.0, MIT License.
+- [png](https://github.com/image-rs/image-png), version 0.17.16, MIT License or Apache License 2.0.
 
 Copyright and license notices are retained in the bundled JavaScript files under `Resources/`.
 LightMark includes a modified copy of AnyDoc 0.1.8's Markdown renderer under `src-tauri/src/anydoc_markdown/`; the modification resolves embedded image assets to local relative paths while preserving their reading position.

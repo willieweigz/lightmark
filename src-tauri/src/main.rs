@@ -12,6 +12,7 @@ use tauri::{Emitter, Manager};
 mod anydoc_markdown;
 mod codex;
 mod document_import;
+mod pdf_import;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
