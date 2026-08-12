@@ -2299,7 +2299,7 @@ dependencies = [
 
 [[package]]
 name = "lightmark"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anydoc",
  "base64 0.22.1",
@@ -2317,6 +2317,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

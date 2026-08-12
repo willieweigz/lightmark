@@ -242,6 +242,16 @@
       </main>
     </div>
 
+    <div id="document-context-menu" class="document-context-menu" role="menu" aria-label="文档操作" hidden>
+      <button id="rename-document" type="button" role="menuitem">
+        <span>重命名</span><kbd>F2</kbd>
+      </button>
+      <span class="context-menu-divider" aria-hidden="true"></span>
+      <button id="delete-document" class="danger" type="button" role="menuitem">
+        <span>移到回收站</span>
+      </button>
+    </div>
+
     <dialog id="syntax-dialog" class="syntax-dialog">
       <form method="dialog" class="dialog-shell">
         <header class="dialog-header">
@@ -310,6 +320,35 @@
           <button id="cancel-pending" class="button quiet">取消</button>
           <button id="discard-pending" class="button danger">不保存</button>
           <button id="save-pending" class="button primary">保存并继续</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="rename-dialog" class="confirm-dialog file-action-dialog">
+      <form id="rename-form" class="dialog-shell compact">
+        <p class="eyebrow">重命名文档</p>
+        <h2 id="rename-dialog-title">修改文件名</h2>
+        <label class="file-name-field" for="rename-input">新文件名</label>
+        <input id="rename-input" type="text" autocomplete="off" spellcheck="false" required />
+        <p class="file-action-hint">不填写扩展名时会保留原来的 .md 或 .markdown。</p>
+        <p id="rename-error" class="file-action-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button id="cancel-rename" class="button quiet" type="button">取消</button>
+          <button id="confirm-rename" class="button primary" type="submit">重命名</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="delete-dialog" class="confirm-dialog file-action-dialog">
+      <div class="dialog-shell compact">
+        <p class="eyebrow danger-eyebrow">删除文档</p>
+        <h2>移到 Windows 回收站？</h2>
+        <p id="delete-document-name" class="delete-document-name"></p>
+        <p id="delete-unsaved-warning" class="file-action-warning" hidden>这篇文档还有未保存的修改，继续后这些修改也会丢失。</p>
+        <p>删除后仍可从 Windows 回收站恢复。</p>
+        <div class="dialog-actions">
+          <button id="cancel-delete" class="button quiet" type="button">取消</button>
+          <button id="confirm-delete" class="button danger destructive" type="button">移到回收站</button>
         </div>
       </div>
     </dialog>

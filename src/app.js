@@ -61,6 +61,20 @@ const elements = {
   emptyList: document.querySelector("#empty-list"),
   emptyImages: document.querySelector("#empty-images"),
   emptyOutline: document.querySelector("#empty-outline"),
+  documentContextMenu: document.querySelector("#document-context-menu"),
+  renameDocument: document.querySelector("#rename-document"),
+  deleteDocument: document.querySelector("#delete-document"),
+  renameDialog: document.querySelector("#rename-dialog"),
+  renameForm: document.querySelector("#rename-form"),
+  renameInput: document.querySelector("#rename-input"),
+  renameError: document.querySelector("#rename-error"),
+  cancelRename: document.querySelector("#cancel-rename"),
+  confirmRename: document.querySelector("#confirm-rename"),
+  deleteDialog: document.querySelector("#delete-dialog"),
+  deleteDocumentName: document.querySelector("#delete-document-name"),
+  deleteUnsavedWarning: document.querySelector("#delete-unsaved-warning"),
+  cancelDelete: document.querySelector("#cancel-delete"),
+  confirmDelete: document.querySelector("#confirm-delete"),
   title: document.querySelector("#document-title"),
   importBadge: document.querySelector("#import-badge"),
   path: document.querySelector("#document-path"),
@@ -181,6 +195,8 @@ const state = {
   aiBusy: false,
   aiWidth: Math.min(560, Math.max(300, Number(localStorage.getItem("lightmark-ai-width")) || 360)),
   aiAssistantBody: null,
+  contextDocument: null,
+  fileActionDocument: null,
 };
 
 const SIDEBAR_MIN_WIDTH = 190;
@@ -399,8 +415,170 @@ function renderFileList(entries, container, kind) {
     button.addEventListener("click", () => guardUnsaved(() => (
       kind === "image" ? loadImage(entry.path) : loadDocument(entry.path)
     )));
+    if (kind === "markdown") {
+      button.addEventListener("contextmenu", (event) => openDocumentContextMenu(event, entry, button));
+      button.addEventListener("keydown", (event) => {
+        if (event.key === "F2") {
+          event.preventDefault();
+          state.fileActionDocument = entry;
+          showRenameDialog();
+        } else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+          event.preventDefault();
+          const bounds = button.getBoundingClientRect();
+          openDocumentContextMenu({ preventDefault() {}, clientX: bounds.left + 22, clientY: bounds.top + 22 }, entry, button);
+        }
+      });
+    }
     container.append(button);
   });
+}
+
+function sameLocalPath(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  return left.replaceAll("/", "\\").toLocaleLowerCase() === right.replaceAll("/", "\\").toLocaleLowerCase();
+}
+
+function closeDocumentContextMenu({ restoreFocus = false } = {}) {
+  const targetButton = state.contextDocument?.button;
+  targetButton?.classList.remove("context-target");
+  elements.documentContextMenu.hidden = true;
+  elements.documentContextMenu.setAttribute("aria-hidden", "true");
+  state.contextDocument = null;
+  if (restoreFocus && targetButton?.isConnected) targetButton.focus();
+}
+
+function openDocumentContextMenu(event, entry, button) {
+  event.preventDefault();
+  closeDocumentContextMenu();
+  state.contextDocument = { ...entry, button };
+  button.classList.add("context-target");
+  elements.documentContextMenu.hidden = false;
+  elements.documentContextMenu.setAttribute("aria-hidden", "false");
+  const bounds = elements.documentContextMenu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(event.clientX, window.innerWidth - bounds.width - 8));
+  const top = Math.max(8, Math.min(event.clientY, window.innerHeight - bounds.height - 8));
+  elements.documentContextMenu.style.left = `${left}px`;
+  elements.documentContextMenu.style.top = `${top}px`;
+  elements.renameDocument.focus({ preventScroll: true });
+}
+
+function showRenameDialog() {
+  const entry = state.fileActionDocument || state.contextDocument;
+  if (!entry) return;
+  state.fileActionDocument = { path: entry.path, name: entry.name };
+  closeDocumentContextMenu();
+  elements.renameInput.value = entry.name;
+  elements.renameError.hidden = true;
+  elements.renameError.textContent = "";
+  elements.confirmRename.disabled = false;
+  elements.renameDialog.showModal();
+  requestAnimationFrame(() => {
+    const extensionIndex = entry.name.toLocaleLowerCase().endsWith(".markdown")
+      ? entry.name.length - ".markdown".length
+      : entry.name.toLocaleLowerCase().endsWith(".md")
+        ? entry.name.length - ".md".length
+        : entry.name.length;
+    elements.renameInput.focus();
+    elements.renameInput.setSelectionRange(0, extensionIndex);
+  });
+}
+
+function showDeleteDialog() {
+  const entry = state.contextDocument;
+  if (!entry) return;
+  state.fileActionDocument = { path: entry.path, name: entry.name };
+  closeDocumentContextMenu();
+  elements.deleteDocumentName.textContent = `“${entry.name}”`;
+  elements.deleteUnsavedWarning.hidden = !(state.dirty && sameLocalPath(state.currentPath, entry.path));
+  elements.confirmDelete.disabled = false;
+  elements.deleteDialog.showModal();
+  elements.cancelDelete.focus();
+}
+
+function focusCurrentDocumentItem() {
+  const current = [...elements.documentList.querySelectorAll(".document-item")]
+    .find((button) => button.getAttribute("aria-current") === "page");
+  current?.focus();
+}
+
+async function renameSelectedDocument() {
+  const entry = state.fileActionDocument;
+  if (!entry) return;
+  elements.confirmRename.disabled = true;
+  elements.renameError.hidden = true;
+  try {
+    const renamed = await invoke("rename_markdown_document", {
+      path: entry.path,
+      newName: elements.renameInput.value,
+    });
+    const index = state.documents.findIndex((documentEntry) => sameLocalPath(documentEntry.path, entry.path));
+    if (index >= 0) state.documents[index] = renamed;
+    else state.documents.push(renamed);
+    state.documents = sortDocuments(state.documents);
+    if (sameLocalPath(state.currentPath, entry.path)) {
+      state.currentPath = renamed.path;
+      elements.title.textContent = renamed.name;
+      elements.path.textContent = renamed.path;
+      updateWindowTitle();
+    }
+    elements.renameDialog.close();
+    renderDocumentList();
+    focusCurrentDocumentItem();
+  } catch (error) {
+    elements.renameError.textContent = String(error);
+    elements.renameError.hidden = false;
+    elements.renameInput.focus();
+  } finally {
+    elements.confirmRename.disabled = false;
+  }
+}
+
+async function clearCurrentDocument() {
+  state.currentPath = null;
+  clearImportState();
+  state.lastSavedText = "";
+  state.previewSyncOffset = 0;
+  state.previewProgrammaticTarget = null;
+  elements.editor.value = "";
+  state.headings = [];
+  state.collapsedHeadingKeys.clear();
+  elements.outlineList.replaceChildren();
+  elements.title.textContent = "轻阅 Markdown";
+  elements.path.textContent = "选择左侧文档开始阅读";
+  setContentKind("markdown");
+  setDirty(false);
+  renderEditorOverlay();
+  renderDocumentList();
+  await renderPreview();
+  updateCopyAvailability();
+  updateAiContextSummary();
+  updateAiControls();
+  resetAiConversation();
+}
+
+async function deleteSelectedDocument() {
+  const entry = state.fileActionDocument;
+  if (!entry) return;
+  elements.confirmDelete.disabled = true;
+  try {
+    const deletedIndex = state.documents.findIndex((documentEntry) => sameLocalPath(documentEntry.path, entry.path));
+    await invoke("trash_markdown_document", { path: entry.path });
+    state.documents = state.documents.filter((documentEntry) => !sameLocalPath(documentEntry.path, entry.path));
+    elements.deleteDialog.close();
+    if (sameLocalPath(state.currentPath, entry.path)) {
+      state.currentPath = null;
+      const replacement = state.documents[Math.min(Math.max(0, deletedIndex), state.documents.length - 1)];
+      if (replacement) await loadDocument(replacement.path);
+      else await clearCurrentDocument();
+    } else {
+      renderDocumentList();
+      focusCurrentDocumentItem();
+    }
+  } catch (error) {
+    await showError("无法移到回收站", error);
+  } finally {
+    elements.confirmDelete.disabled = false;
+  }
 }
 
 function renderDocumentList() {
@@ -2187,8 +2365,27 @@ elements.findPrevious.addEventListener("click", () => stepFind(-1));
 elements.findNext.addEventListener("click", () => stepFind(1));
 elements.findClose.addEventListener("click", closeFindBar);
 document.addEventListener("pointerdown", (event) => {
+  if (!elements.documentContextMenu.hidden && !event.target.closest("#document-context-menu")) closeDocumentContextMenu();
   if (!elements.copyMenu.hidden && !event.target.closest(".copy-menu-wrap")) setCopyMenu(false);
   if (!elements.htmlCompletion.hidden && !event.target.closest("#html-completion") && event.target !== elements.editor) closeHtmlCompletion();
+});
+elements.documentList.addEventListener("scroll", () => closeDocumentContextMenu(), { passive: true });
+window.addEventListener("blur", () => closeDocumentContextMenu());
+elements.renameDocument.addEventListener("click", showRenameDialog);
+elements.deleteDocument.addEventListener("click", showDeleteDialog);
+elements.cancelRename.addEventListener("click", () => elements.renameDialog.close());
+elements.renameForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  renameSelectedDocument();
+});
+elements.cancelDelete.addEventListener("click", () => elements.deleteDialog.close());
+elements.confirmDelete.addEventListener("click", deleteSelectedDocument);
+elements.renameDialog.addEventListener("close", () => {
+  state.fileActionDocument = null;
+  elements.renameError.hidden = true;
+});
+elements.deleteDialog.addEventListener("close", () => {
+  state.fileActionDocument = null;
 });
 for (const [tool, details] of Object.entries(formatToolDetails)) {
   details.button.addEventListener("mousedown", (event) => event.preventDefault());
@@ -2219,6 +2416,12 @@ elements.savePending.addEventListener("click", async () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !elements.documentContextMenu.hidden) {
+    event.preventDefault();
+    closeDocumentContextMenu({ restoreFocus: true });
+    return;
+  }
+  if (elements.renameDialog.open || elements.deleteDialog.open) return;
   if (event.key === "Escape" && !elements.copyMenu.hidden) {
     event.preventDefault();
     setCopyMenu(false);
