@@ -1,7 +1,7 @@
 {
   "name": "lightmark",
   "private": true,
-  "version": "0.5.5",
+  "version": "0.5.6",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -14,6 +14,10 @@
     "test:windows:heading": "node scripts/windows-heading-fold-e2e.mjs",
     "test:windows:image": "node scripts/windows-image-e2e.mjs",
     "test:windows:import": "node scripts/windows-document-import-e2e.mjs",
+    "test:windows:file-actions": "node scripts/windows-file-actions-e2e.mjs",
+    "test:windows:file-actions:native": "node scripts/windows-file-actions-native-e2e.mjs",
+    "test:windows:paste": "node scripts/windows-pasted-images-e2e.mjs",
+    "test:windows:paste:native": "node scripts/windows-pasted-images-native-e2e.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
