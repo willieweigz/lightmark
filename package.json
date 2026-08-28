@@ -16,6 +16,8 @@
     "test:windows:import": "node scripts/windows-document-import-e2e.mjs",
     "test:windows:file-actions": "node scripts/windows-file-actions-e2e.mjs",
     "test:windows:file-actions:native": "node scripts/windows-file-actions-native-e2e.mjs",
+    "test:windows:paste": "node scripts/windows-pasted-images-e2e.mjs",
+    "test:windows:paste:native": "node scripts/windows-pasted-images-native-e2e.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

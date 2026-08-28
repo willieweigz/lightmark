@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { message, open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { accountLabel, answerModeDetails, chooseAiContext, contextPreview, normalizeAnswerMode } from "./ai.js";
+import { clipboardHtmlToMarkdown, referencedPastedImages } from "./paste.js";
 import {
   applyTextCompletion,
   buildHeadingSections,
@@ -197,6 +198,7 @@ const state = {
   aiAssistantBody: null,
   contextDocument: null,
   fileActionDocument: null,
+  pendingPastedImages: new Map(),
 };
 
 const SIDEBAR_MIN_WIDTH = 190;
@@ -363,13 +365,18 @@ async function renderPreview() {
 
 function setDirty(dirty) {
   state.dirty = state.contentKind === "markdown" && dirty;
+  const pendingImageCount = state.contentKind === "markdown"
+    ? referencedPastedImages(elements.editor.value, state.pendingPastedImages).length
+    : 0;
   elements.dirtyDot.classList.toggle("visible", state.dirty);
   elements.saveStatus.textContent = state.contentKind === "image" && state.currentPath
     ? "本地图片 · 只读"
     : state.importSourcePath
       ? "离线导入预览 · Ctrl+S 保存为 Markdown"
       : state.dirty
-        ? "有未保存修改 · Ctrl+S 保存"
+        ? pendingImageCount
+          ? `有未保存修改 · ${pendingImageCount} 张粘贴图片待保存 · Ctrl+S`
+          : "有未保存修改 · Ctrl+S 保存"
         : state.currentPath
           ? "已保存"
           : "未打开文档";
@@ -536,6 +543,7 @@ async function renameSelectedDocument() {
 async function clearCurrentDocument() {
   state.currentPath = null;
   clearImportState();
+  state.pendingPastedImages.clear();
   state.lastSavedText = "";
   state.previewSyncOffset = 0;
   state.previewProgrammaticTarget = null;
@@ -828,6 +836,7 @@ async function loadImage(path, { refreshSiblings = false } = {}) {
   state.currentPath = payload.path;
   state.currentDirectory = payload.directory;
   clearImportState();
+  state.pendingPastedImages.clear();
   state.lastSavedText = "";
   state.imageByteSize = payload.byteSize;
   state.imageMimeType = payload.mimeType;
@@ -875,6 +884,7 @@ async function importSourceDocument(path) {
   state.currentDirectory = payload.directory;
   state.importSourcePath = payload.sourcePath;
   state.importSuggestedPath = payload.suggestedPath;
+  state.pendingPastedImages.clear();
   state.lastSavedText = "";
   state.previewSyncOffset = 0;
   state.previewProgrammaticTarget = null;
@@ -924,6 +934,7 @@ async function loadDocument(path, { refreshSiblings = false } = {}) {
   state.currentPath = payload.path;
   state.currentDirectory = payload.directory;
   clearImportState();
+  state.pendingPastedImages.clear();
   setContentKind("markdown");
   elements.imageContent.removeAttribute("src");
   state.imageNaturalWidth = 0;
@@ -1025,10 +1036,31 @@ async function createDocument() {
 async function saveDocument() {
   if (state.contentKind === "image") return false;
   if (!state.currentPath) return saveDocumentAs();
-  await invoke("write_document", { path: state.currentPath, contents: elements.editor.value });
+  const localized = await writeDocumentWithPastedImages(state.currentPath, elements.editor.value);
   state.lastSavedText = elements.editor.value;
   setDirty(false);
+  if (localized?.savedImageCount) {
+    elements.saveStatus.textContent = `已保存 · ${localized.savedImageCount} 张图片已存入 assets`;
+  }
   return true;
+}
+
+async function writeDocumentWithPastedImages(path, contents) {
+  const images = referencedPastedImages(contents, state.pendingPastedImages);
+  if (!images.length) {
+    await invoke("write_document", { path, contents });
+    state.pendingPastedImages.clear();
+    return null;
+  }
+  const result = await invoke("save_document_with_pasted_images", { path, contents, images });
+  elements.editor.value = result.contents;
+  state.pendingPastedImages.clear();
+  renderEditorOverlay();
+  renderOutline();
+  await renderPreview();
+  updateAiContextSummary();
+  updateAiControls();
+  return result;
 }
 
 async function saveDocumentAs() {
@@ -1046,7 +1078,10 @@ async function saveDocumentAs() {
       contents: elements.editor.value,
     })
     : null;
-  if (!importResult) await invoke("write_document", { path, contents: elements.editor.value });
+  const hasPastedImages = referencedPastedImages(elements.editor.value, state.pendingPastedImages).length > 0;
+  const localized = !importResult || hasPastedImages
+    ? await writeDocumentWithPastedImages(path, elements.editor.value)
+    : null;
   await loadDocument(path, { refreshSiblings: true });
   if (importResult?.extractedAssetCount || importResult?.skippedAssetCount) {
     const details = [];
@@ -1055,6 +1090,12 @@ async function saveDocumentAs() {
     if (importResult.appendedAssetCount) details.push(`${importResult.appendedAssetCount} 张无法定位并放在文末`);
     if (importResult.skippedAssetCount) details.push(`${importResult.skippedAssetCount} 个不支持的内嵌对象只保留了文字`);
     await message(details.join("；") + "。", { title: "导入完成", kind: "info" });
+  }
+  if (localized?.savedImageCount) {
+    await message(
+      `${localized.savedImageCount} 张粘贴图片已保存到 Markdown 同目录的 assets 文件夹。`,
+      { title: "图片已保存", kind: "info" },
+    );
   }
   return true;
 }
@@ -2166,6 +2207,27 @@ async function showError(title, error) {
   await message(String(error), { title, kind: "error" });
 }
 
+function insertPastedMarkdown(markdown) {
+  const start = elements.editor.selectionStart;
+  const end = elements.editor.selectionEnd;
+  elements.editor.setRangeText(markdown, start, end, "end");
+  elements.editor.dispatchEvent(new InputEvent("input", {
+    bubbles: true,
+    inputType: "insertFromPaste",
+    data: markdown,
+  }));
+}
+
+function pasteRichWebContent(event) {
+  const html = event.clipboardData?.getData("text/html") || "";
+  if (!html || !/<img\b/i.test(html)) return;
+  const converted = clipboardHtmlToMarkdown(html);
+  if (!converted.markdown || !converted.images.length) return;
+  event.preventDefault();
+  converted.images.forEach((image) => state.pendingPastedImages.set(image.id, image));
+  insertPastedMarkdown(converted.markdown);
+}
+
 elements.editor.addEventListener("input", () => {
   renderEditorOverlay();
   setDirty(elements.editor.value !== state.lastSavedText);
@@ -2176,6 +2238,7 @@ elements.editor.addEventListener("input", () => {
   updateAiContextSummary();
   updateAiControls();
 });
+elements.editor.addEventListener("paste", pasteRichWebContent);
 elements.editor.addEventListener("keydown", (event) => {
   if (elements.htmlCompletion.hidden) return;
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {

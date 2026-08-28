@@ -12,6 +12,7 @@ use tauri::{Emitter, Manager};
 mod anydoc_markdown;
 mod codex;
 mod document_import;
+mod pasted_images;
 mod pdf_import;
 
 #[derive(Serialize)]
@@ -444,6 +445,7 @@ fn main() {
             read_document,
             read_image,
             write_document,
+            pasted_images::save_document_with_pasted_images,
             read_relative_image,
             resolve_markdown_link,
             startup_paths,
